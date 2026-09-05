@@ -1,0 +1,123 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ─────────────────────────────────────────────────────────────
+    // Rooms: private by default.
+    //
+    // A room is only readable by its members. A non-member cannot
+    // read the room, trigger it, or stop an alarm. Invitees join by
+    // presenting the room's join code (delivered via the invite link);
+    // possession of the code is the invitation.
+    //
+    // Room document shape:
+    //   ownerUid:        string — who created the room (the admin)
+    //   joinCode:        string — 6+ char invite code
+    //   members:         [uid]  — who may read/trigger
+    //   memberProfiles:  { uid: { name, photoURL, joinedAt } }
+    //   createdAt:       timestamp
+    //   activeUntil:     timestamp|null
+    //   lastTriggered:   timestamp|null
+    //   triggeredBy:     uid|null
+    // ─────────────────────────────────────────────────────────────
+    match /rooms/{roomId} {
+      // Only members can read a room's state. Guests who are not yet
+      // members are handled by the join flow (update only).
+      allow read: if request.auth != null
+        && request.auth.uid in resource.data.members;
+
+      // Creating a room: the creator becomes owner + first member and
+      // generates the join code. No alarm state may be pre-seeded.
+      allow create: if request.auth != null
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.members == [request.auth.uid]
+        && request.resource.data.memberProfiles[request.auth.uid] is map
+        && request.resource.data.memberProfiles[request.auth.uid].name is string
+        && request.resource.data.joinCode is string
+        && request.resource.data.joinCode.size() >= 6
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.activeUntil == null
+        && request.resource.data.lastTriggered == null
+        && request.resource.data.triggeredBy == null;
+
+      // Updates fall into exactly one of three allowed operations.
+      allow update: if request.auth != null && (
+        // (A) SELF-JOIN — a guest who knows the join code adds exactly
+        //     themselves (and their profile) to the room. The client
+        //     sends the code from the invite link; it must match the
+        //     stored code. Membership may only grow by one (the caller).
+        (request.resource.data.joinCode == resource.data.joinCode
+          && request.resource.data.members.hasAll(resource.data.members)
+          && request.resource.data.members.size() == resource.data.members.size() + 1
+          && request.auth.uid in request.resource.data.members
+          && request.resource.data.memberProfiles[request.auth.uid] is map
+          && request.resource.data.memberProfiles[request.auth.uid].name is string
+          && request.resource.data.memberProfiles.keys().hasAll(resource.data.memberProfiles.keys())
+          && request.resource.data.memberProfiles.keys().size() == resource.data.memberProfiles.keys().size() + 1
+          && request.resource.data.ownerUid == resource.data.ownerUid
+          && request.resource.data.createdAt == resource.data.createdAt
+          && request.resource.data.activeUntil == resource.data.activeUntil
+          && request.resource.data.lastTriggered == resource.data.lastTriggered
+          && request.resource.data.triggeredBy == resource.data.triggeredBy)
+        ||
+        // (B) MEMBER TRIGGER / STOP — a member may trigger an alarm
+        //     (within a sane 10-minute window, as the acting user) or
+        //     stop an alarm they triggered themselves. Nothing else in
+        //     the room may change during a trigger/stop.
+        (request.auth.uid in resource.data.members
+          && request.resource.data.members == resource.data.members
+          && request.resource.data.joinCode == resource.data.joinCode
+          && request.resource.data.memberProfiles == resource.data.memberProfiles
+          && request.resource.data.ownerUid == resource.data.ownerUid
+          && request.resource.data.createdAt == resource.data.createdAt
+          && (
+            // Trigger: the acting user triggers; the active window must
+            // be a sane future window (blocks spoofing other users or
+            // setting an alarm that would ring forever).
+            (request.resource.data.triggeredBy == request.auth.uid
+              && request.resource.data.lastTriggered is timestamp
+              && request.resource.data.activeUntil is timestamp
+              && request.resource.data.activeUntil > request.time
+              && request.resource.data.activeUntil < request.time + duration.value(10, 'm'))
+            ||
+            // Stop: only the user who triggered the alarm can clear it.
+            (request.resource.data.triggeredBy == null
+              && request.resource.data.activeUntil == null
+              && resource.data.triggeredBy == request.auth.uid)
+          ))
+        ||
+        // (C) OWNER ADMIN — the owner may remove members (but never
+        //     themselves) or rotate the join code. Alarm state may not
+        //     change through this branch, and membership may only
+        //     shrink (additions happen through the join code).
+        (request.auth.uid == resource.data.ownerUid
+          && request.auth.uid in request.resource.data.members
+          && request.resource.data.members.size() <= resource.data.members.size()
+          && request.resource.data.memberProfiles.keys().size() <= resource.data.memberProfiles.keys().size()
+          && request.resource.data.ownerUid == resource.data.ownerUid
+          && request.resource.data.createdAt == resource.data.createdAt
+          && request.resource.data.activeUntil == resource.data.activeUntil
+          && request.resource.data.lastTriggered == resource.data.lastTriggered
+          && request.resource.data.triggeredBy == resource.data.triggeredBy)
+      );
+
+      allow delete: if false;
+
+      // ─────────────────────────────────────────────────────────────
+      // Push-device subscriptions for Web Push. Only room members can
+      // list them (the relay reads them on behalf of a member who
+      // triggers); each user manages only their own device docs.
+      // ─────────────────────────────────────────────────────────────
+      match /pushDevices/{deviceId} {
+        allow read: if request.auth != null
+          && request.auth.uid in get(/databases/$(database)/documents/rooms/$(roomId)).data.members;
+
+        allow create: if request.auth != null
+          && request.resource.data.uid == request.auth.uid
+          && request.auth.uid in get(/databases/$(database)/documents/rooms/$(roomId)).data.members;
+
+        allow update, delete: if request.auth != null
+          && resource.data.uid == request.auth.uid;
+      }
+    }
+  }
+}

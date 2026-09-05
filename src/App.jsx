@@ -1,205 +1,108 @@
-import React, { useState, useEffect } from 'react'
+import { useEffect, useState } from 'react'
+import { doc, setDoc } from 'firebase/firestore'
+import { onAuthStateChanged } from 'firebase/auth'
+import { useNavigate } from 'react-router-dom'
 import { auth, db } from './firebase'
-import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider } from 'firebase/auth'
-import { doc, onSnapshot, setDoc, updateDoc } from 'firebase/firestore'
-import { useNavigate, useLocation } from 'react-router-dom'
-import './App.css'
+import { makeJoinCode } from './roomUtils'
+import { displayName } from './useRoomAlarm'
 
 function App() {
   const navigate = useNavigate()
-  const _location = useLocation()
-  const [user, setUser] = useState(null)
-  const [_alarmActive, setAlarmActive] = useState(false)
-  const [isHosting, setIsHosting] = useState(false)
-  const alarmRef = doc(db, 'alarms', 'global')
+  const [authState, setAuthState] = useState({ checking: true, user: null })
+  const [creating, setCreating] = useState(false)
+  const [error, setError] = useState('')
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
-      setUser(user)
-      if (!user) navigate('/login')
+      if (!user) {
+        navigate('/login?next=' + encodeURIComponent(window.location.pathname + window.location.search))
+        return
+      }
+      setAuthState({ checking: false, user })
     })
-    return () => unsubscribe()
+    return unsubscribe
   }, [navigate])
 
-  useEffect(() => {
-    if (!user) return
-    const alarmUnsubscribe = onSnapshot(alarmRef, (doc) => {
-      if (doc.exists()) {
-        const data = doc.data()
-        // Check for new alarm trigger
-        if (data.lastTriggered && data.triggeredBy !== user.uid) {
-          const lastTime = new Date(data.lastTriggered).getTime()
-          const now = new Date().getTime()
-          // If alarm triggered within last 30 seconds and from different device
-          if (now - lastTime < 30000) {
-            setAlarmActive(true)
-          }
-        }
-      }
-    })
-    return () => alarmUnsubscribe()
-  }, [user, alarmRef])
-
-  useEffect(() => {
-    // Google sign-in
-    const googleSignIn = () => {
-      signInWithPopup(auth, new GoogleAuthProvider())
-        .then((result) => {
-          const _uid = result.user.uid
-          // Initialize alarm document for this user if not exists
-          setDoc(alarmRef, {
-            lastTriggered: null,
-            triggeredBy: _uid
-          }, { merge: true })
-        })
-        .catch((error) => {
-          console.error('Sign in error:', error)
-        })
+  const createRoom = async () => {
+    if (!authState.user || creating) return
+    setCreating(true)
+    setError('')
+    try {
+      const roomId = Math.random().toString(36).substring(2, 12)
+      const joinCode = makeJoinCode()
+      await setDoc(doc(db, 'rooms', roomId), {
+        ownerUid: authState.user.uid,
+        joinCode,
+        members: [authState.user.uid],
+        memberProfiles: {
+          [authState.user.uid]: {
+            name: displayName(authState.user),
+            photoURL: authState.user.photoURL || null,
+            joinedAt: new Date(),
+          },
+        },
+        createdAt: new Date(),
+        activeUntil: null,
+        lastTriggered: null,
+        triggeredBy: null,
+      })
+      navigate(`/alarm?room=${roomId}&code=${joinCode}`)
+    } catch (err) {
+      console.error('Failed to create room:', err)
+      setError(`Failed to create room: ${err.message}`)
+      setCreating(false)
     }
-    googleSignIn()
-  }, [user, alarmRef])
-
-  const joinRoom = (roomId) => {
-    localStorage.setItem('deviceId', roomId)
-    setIsHosting(true)
-    navigate(`/alarm?room=${roomId}`)
   }
 
-  const _triggerAlarm = () => {
-    if (!user) return
-    const now = new Date().toISOString()
-    updateDoc(alarmRef, {
-      lastTriggered: now,
-      triggeredBy: user.uid
-    })
+  if (authState.checking) {
+    return (
+      <div className="page">
+        <div className="spinner" aria-label="Checking sign-in" />
+        <p className="muted">Checking sign-in…</p>
+      </div>
+    )
   }
 
   return (
-    <div className="App">
-      {user ? (
-        <>
-          {isHosting ? (
-            <AlarmRoom user={user} setAlarmActive={setAlarmActive} />
-          ) : (
-            <div>
-              <h2>Alarm Notification System</h2>
-              <p>
-                Share this link with another device:{' '}
-                <code>{window.location.href}</code>
-              </p>
-              <button
-                onClick={() => joinRoom(Math.random().toString(36).substring(2, 15))}
-                style={{
-                  padding: '10px 20px',
-                  fontSize: '16px',
-                  marginBottom: '10px'
-                }}
-              >
-                Connect as Receiver Device
-              </button>
-            </div>
-          )}
-        </>
-      ) : (
-        <div style={{ padding: '20px' }}>
-          <h3>Please log in to use the alarm system</h3>
+    <div className="page fade-up">
+      <div className="brand">
+        <span className="brand-bell" aria-hidden="true">🔔</span>
+        <span className="brand-name">Alarm App</span>
+      </div>
+      <h2>Alert every device in your room</h2>
+      <p className="muted">
+        Create a private room, share the invite link with your team, and anyone in
+        the room can trigger an alarm that rings on every other device — even when
+        their tab is in the background or their page is closed.
+      </p>
+
+      <div className="card feature-card fade-up delay-1">
+        <div className="feature-grid">
+          <div className="feature">
+            <span className="feature-icon" aria-hidden="true">🔒</span>
+            <span className="feature-title">Private rooms</span>
+            <span className="feature-desc">Members-only access with a short join code</span>
+          </div>
+          <div className="feature">
+            <span className="feature-icon" aria-hidden="true">📲</span>
+            <span className="feature-title">Push alerts</span>
+            <span className="feature-desc">Rings even when the page is closed</span>
+          </div>
+          <div className="feature">
+            <span className="feature-icon" aria-hidden="true">🔔</span>
+            <span className="feature-title">One-tap alarms</span>
+            <span className="feature-desc">Trigger, acknowledge, stop</span>
+          </div>
         </div>
-      )}
-    </div>
-  )
-}
+      </div>
 
-function AlarmRoom({ user, setAlarmActive }) {
-  const location = useLocation()
-  const _roomId = location.query.room || ''
-
-  useEffect(() => {
-    // Listen for alarm events from Firebase
-    const alarmRef = doc(db, 'alarms', 'global')
-    const unsubscribe = onSnapshot(alarmRef, (doc) => {
-      if (doc.exists()) {
-        const data = doc.data()
-        // Check for alarm trigger from different device
-        if (data.lastTriggered && data.triggeredBy !== user.uid) {
-          const lastTime = new Date(data.lastTriggered).getTime()
-          const now = new Date().getTime()
-          // If alarm triggered within last 30 seconds and from different device
-          if (now - lastTime < 30000) {
-            setAlarmActive(true)
-            // Reset after handling so it doesn't persist
-            setTimeout(() => setAlarmActive(false), 100)
-          }
-        }
-      }
-    })
-
-    return () => unsubscribe()
-  }, [user, setAlarmActive])
-
-  useEffect(() => {
-    if (_alarmActive) {
-      // Play alarm sound
-      const audio = new Audio()
-      audio.src = 'https://assets.mixkit.co/active_storage_audio/mixkit-alarm-buzzer-beep-931.mp3'
-      audio.loop = true
-      audio.play().catch(() => {})
-
-      // Show visual alert overlay
-      const alertDiv = document.createElement('div')
-      alertDiv.style.cssText = `
-        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-        background: rgba(0,0,0,0.8); color: white; display: flex;
-        flex-direction: column; align-items: center; justify-content: center;
-        z-index: 9999; font-family: sans-serif;
-      `
-      alertDiv.innerHTML = `
-        <h2>ALERT: Device is ONLINE</h2>
-        <p>Alarm triggered from another device</p>
-        <button 
-          onClick="this.parentElement.parentElement.style.display='none'"
-          style={{ padding: '10px 20px', marginTop: '20px', fontSize: '16px' }}
-        >
-          Acknowledge
+      <div className="controls">
+        <button className="btn btn-primary btn-lg" onClick={createRoom} disabled={creating}>
+          <span aria-hidden="true">{creating ? '⏳' : '＋'}</span>
+          {creating ? 'Creating room…' : 'Create Alarm Room'}
         </button>
-      `
-      document.body.appendChild(alertDiv)
-    }
-  }, [])
-
-  return (
-    <div className="App">
-      <h2>Alarm Controller</h2>
-      <button
-        onClick={_triggerAlarm}
-        style={{
-          padding: '10px 20px',
-          fontSize: '16px',
-          marginBottom: '10px'
-        }}
-      >
-        Trigger Alarm on Other Device
-      </button>
-      {_alarmActive && (
-        <div style={{
-          position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
-          background: 'rgba(0,0,0,0.8)', color: 'white', display: 'flex',
-          flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-          zIndex: 9999
-        }}>
-          <h2>ALERT: Device is ONLINE</h2>
-          <p>Alarm triggered from another device</p>
-          <button
-            onClick={() => setAlarmActive(false)}
-            style={{
-              padding: '10px 20px',
-              marginTop: '20px',
-              fontSize: '16px'
-            }}
-          >
-            Stop Alarm
-          </button>
-        </div>
-      )}
+      </div>
+      {error && <p className="error" role="alert">{error}</p>}
     </div>
   )
 }

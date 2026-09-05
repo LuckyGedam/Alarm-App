@@ -1,22 +1,42 @@
 import { initializeApp } from "firebase/app";
-import { getAuth } from "firebase/auth";
-import { getFirestore } from "firebase/firestore";
+import { getAuth, connectAuthEmulator } from "firebase/auth";
+import { getFirestore, connectFirestoreEmulator } from "firebase/firestore";
+import { getAnalytics } from "firebase/analytics";
 
-// Read Firebase config from environment variables
+// Vite exposes VITE_-prefixed variables on import.meta.env (not process.env).
 const firebaseConfig = {
-  apiKey: process.env.VITE_FIREBASE_API_KEY,
-  authDomain: process.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: process.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: process.env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: process.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: process.env.VITE_FIREBASE_APP_ID
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
 };
 
 // Validate config
 if (!firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('YOUR')) {
-  console.error('Firebase config missing. Please set VITE_FIREBASE_API_KEY and other env vars.');
+  console.error('Firebase config missing. Please set the VITE_FIREBASE_* env vars (see .env.example).');
 }
 
 const app = initializeApp(firebaseConfig);
+
+// Analytics is optional — it can throw when the project has it disabled.
+if (firebaseConfig.measurementId) {
+  try {
+    getAnalytics(app);
+  } catch (error) {
+    console.warn('Firebase Analytics unavailable:', error.message);
+  }
+}
+
 export const auth = getAuth(app);
 export const db = getFirestore(app);
+
+// Local E2E testing: point the SDK at the Firebase emulators when
+// VITE_USE_FIREBASE_EMULATORS=true (see firebase.json for the ports).
+const useEmulators = import.meta.env.VITE_USE_FIREBASE_EMULATORS === 'true';
+if (useEmulators) {
+  connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
+  connectFirestoreEmulator(db, '127.0.0.1', 8080);
+}

@@ -24,3 +24,11 @@ dist-ssr
 *.sw?
 
 .vercel
+
+# Playwright
+test-results
+playwright-report
+
+# Firebase emulator
+.firebase
+firebase-debug.log
