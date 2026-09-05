@@ -44,8 +44,13 @@ export async function enablePush(roomId, user) {
   const registration = await navigator.serviceWorker.register(SW_PATH)
   let subscription = await registration.pushManager.getSubscription()
 
-  if (!subscription) {
-    if (Notification.permission !== 'granted') return { status: 'needs-permission' }
+    if (!subscription) {
+    if (Notification.permission !== 'granted') {
+      const permission = await Notification.requestPermission()
+      if (permission !== 'granted') {
+        return { status: permission === 'denied' ? 'denied' : 'needs-permission' }
+      }
+    }
     subscription = await registration.pushManager.subscribe({
       userVisibleOnly: true,
       applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
