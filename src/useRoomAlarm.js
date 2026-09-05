@@ -136,7 +136,7 @@ export function useRoomAlarm(roomId, user) {
       }
       await updateDoc(alarmRef, {
         members: arrayUnion(user.uid),
-        memberProfiles: { [user.uid]: profile },
+        [`memberProfiles.${user.uid}`]: profile,
         joinCode: String(code).trim().toUpperCase(),
       })
       // The snapshot listener flips `access` to 'member' automatically.
