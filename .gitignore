@@ -32,3 +32,6 @@ playwright-report
 # Firebase emulator
 .firebase
 firebase-debug.log
+
+# Local env (contains Firebase web config)
+.env
