@@ -5,9 +5,11 @@ import { addDoc, collection, doc, updateDoc } from 'firebase/firestore'
 import { auth, db } from './firebase'
 import { useRoomAlarm } from './useRoomAlarm'
 import { usePushHistory } from './usePushHistory'
+import { useCheckins } from './useCheckins'
 import { playAlarm } from './alarmSound'
 import { avatarGradient, initialsOf, makeJoinCode } from './roomUtils'
-import { enablePush, disablePush, pushSupported, sendPushAlert, sendTestPush, storedDeviceId, vapidConfigured } from './push'
+import { enablePush, disablePush, pushSupported, sendPushAlert, sendTestPush, storedDeviceId, storeSubscription, vapidConfigured } from './push'
+import { captureAndUploadCheckin, cameraCaptureSupported } from './checkin'
 import IosInstallBanner from './IosInstallBanner'
 import { isIOS, isStandalone } from './platform'
 
@@ -84,12 +86,17 @@ function AlarmRoom() {
   const [testingPush, setTestingPush] = useState(false)
   const [pushState, setPushState] = useState('idle') // idle | working | enabled | needs-permission | denied | unsupported | error
   const [removing, setRemoving] = useState(false)
+  const [burstCount, setBurstCount] = useState(3) // repeats per recipient device: 1 | 3 | 5 | 10
+  const [consentDismissed, setConsentDismissed] = useState(false)
+  const [consentSaving, setConsentSaving] = useState(false)
   const alarmRoomRef = useMemo(() => (roomId ? doc(db, 'rooms', roomId) : null), [roomId])
   const notificationTimer = useRef(null)
+  const checkinDoneRef = useRef(false)
 
   const { room, access, roomActive, alarmActive, trigger, stop, acknowledge, joinRoom } =
     useRoomAlarm(roomId, authState.user)
   const pushes = usePushHistory(roomId, access === 'member')
+  const checkins = useCheckins(roomId, access === 'member')
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
@@ -111,30 +118,22 @@ function AlarmRoom() {
 
   // Background-tab alert: Notification API when the tab is hidden AND this
   // device has no Web Push subscription. When push is subscribed, the service
-  // worker shows the notification for background/closed pages itself, so an
-  // in-tab notification would just duplicate it. Both share the same tag
-  // (`alarm-${roomId}`), so even if they race the browser collapses them.
+  // worker shows the burst notifications for background/closed pages itself,
+  // so an in-tab notification would just duplicate them. We wait for the
+  // push check to settle before showing anything, so the two paths never
+  // race into a duplicate.
   useEffect(() => {
     if (!alarmActive || typeof Notification === 'undefined') return undefined
     if (Notification.permission !== 'granted') return undefined
 
     let disposed = false
-    let pushSubscribed = false
-    const findPush = async () => {
-      try {
-        if (!('serviceWorker' in navigator) || !('PushManager' in window)) return
-        const registration = await navigator.serviceWorker.getRegistration()
-        const subscription = await registration?.pushManager.getSubscription()
-        if (disposed) return
-        pushSubscribed = Boolean(subscription)
-      } catch {
-        // Can't tell — fall back to the in-tab notification.
-      }
-    }
-    findPush()
+    let hasPush = false
+    let settled = false
+    let shown = false
 
     const show = () => {
-      if (disposed || pushSubscribed || !document.hidden) return
+      if (disposed || !settled || hasPush || shown || !document.hidden) return
+      shown = true
       const n = new Notification('🚨 ALARM', {
         body: 'An alarm is ringing in your room.',
         tag: `alarm-${roomId}`,
@@ -142,12 +141,27 @@ function AlarmRoom() {
       })
       notificationTimer.current = setTimeout(() => n.close(), 20000)
     }
-    show()
-    const onVisibility = () => {
-      if (!document.hidden) {
-        clearTimeout(notificationTimer.current)
-      } else if (alarmActive) {
+
+    ;(async () => {
+      try {
+        if (!('serviceWorker' in navigator) || !('PushManager' in window)) return
+        const registration = await navigator.serviceWorker.getRegistration()
+        const subscription = await registration?.pushManager.getSubscription()
+        hasPush = Boolean(subscription)
+      } catch {
+        // Can't tell — treat as no push and use the in-tab fallback.
+      } finally {
+        settled = true
         show()
+      }
+    })()
+
+    const onVisibility = () => {
+      if (document.hidden) {
+        show()
+      } else {
+        clearTimeout(notificationTimer.current)
+        shown = false
       }
     }
     document.addEventListener('visibilitychange', onVisibility)
@@ -158,11 +172,14 @@ function AlarmRoom() {
     }
   }, [alarmActive, roomId])
 
-  // Restore the push state for this room on load. If alerts were enabled
-  // before (a device id is on file) but the browser invalidated the
-  // subscription in the meantime, silently re-subscribe and re-store it —
-  // no permission prompt, since permission was already granted earlier.
   const isMember = Boolean(room && access === 'member')
+
+  // Restore the push state for this room on load. If alerts were enabled
+  // before (a device id is on file), refresh the stored subscription in
+  // Firestore so it always matches what pushManager actually holds — the
+  // relay may have pruned the doc as stale, or the browser may have swapped
+  // the endpoint. If the browser invalidated the subscription entirely,
+  // silently re-subscribe (no permission prompt — it was granted earlier).
   useEffect(() => {
     if (!roomId || !authState.user || !isMember) return undefined
     if (!pushSupported() || !storedDeviceId()) return undefined
@@ -172,9 +189,11 @@ function AlarmRoom() {
       try {
         const registration = await navigator.serviceWorker.getRegistration()
         const subscription = await registration?.pushManager.getSubscription()
-        if (cancelled) return
         if (subscription) {
-          setPushState('enabled')
+          // Subscription alive: make sure the room's pushDevices doc points
+          // at it (idempotent), then report the device as enabled.
+          await storeSubscription(roomId, authState.user, subscription)
+          if (!cancelled) setPushState('enabled')
           return
         }
         const result = await enablePush(roomId, authState.user, { silent: true })
@@ -187,6 +206,57 @@ function AlarmRoom() {
       cancelled = true
     }
   }, [roomId, authState.user, isMember])
+
+  // ── Camera check-in consent ────────────────────────────────────────
+  // Consent lives on the member profile (memberProfiles.<uid>.cameraConsent)
+  // so it survives relay pruning of pushDevices docs and disable/enable
+  // toggles. Shown when this device has alerts on but the member has not
+  // consented yet; nothing about the camera runs before consent is true.
+  const cameraConsent = Boolean(room?.memberProfiles?.[authState.user?.uid]?.cameraConsent)
+  const showConsentDialog = isMember && pushState === 'enabled' && !consentDismissed && !cameraConsent
+
+  // Capture once per page session when this device has alerts enabled and
+  // the member consented. Runs on load (a notification tap loads the room
+  // with ?via=notification, which marks the check-in as such). Camera
+  // failures (denied/unavailable) are skipped inside captureAndUploadCheckin
+  // and never retried in a loop.
+  useEffect(() => {
+    if (!roomId || !authState.user || !isMember) return undefined
+    if (pushState !== 'enabled' || !cameraConsent) return undefined
+    if (checkinDoneRef.current) return undefined
+    checkinDoneRef.current = true
+    const triggeredByNotification = searchParams.get('via') === 'notification'
+    if (triggeredByNotification) {
+      // Keep the URL clean for reloads/shares.
+      navigate(`/alarm?room=${roomId}`, { replace: true })
+    }
+    captureAndUploadCheckin({
+      roomId,
+      uid: authState.user.uid,
+      triggeredByNotification,
+    })
+    return undefined
+  }, [roomId, authState.user, isMember, pushState, cameraConsent, searchParams, navigate])
+
+  const handleCameraConsent = async (allow) => {
+    if (!allow) {
+      setConsentDismissed(true)
+      return
+    }
+    setConsentSaving(true)
+    try {
+      await updateDoc(alarmRoomRef, {
+        [`memberProfiles.${authState.user.uid}.cameraConsent`]: true,
+      })
+      flashToast('Camera check-ins enabled — opening the app will capture a few photos for the room')
+    } catch (err) {
+      console.error('Failed to save camera consent:', err)
+      flashToast('Could not save camera consent — try again')
+    } finally {
+      setConsentSaving(false)
+      setConsentDismissed(true)
+    }
+  }
 
   const copyText = useCallback(
     (text, label = 'Copied!') => {
@@ -264,6 +334,7 @@ function AlarmRoom() {
           title: '🚨 ALARM',
           body: `${authState.user.displayName || 'Someone'} triggered the alarm in your room.`,
           url: `${window.location.origin}/alarm?room=${roomId}`,
+          count: burstCount,
         })
         if (result) {
           // Record the delivery outcome so every member can see it.
@@ -273,16 +344,17 @@ function AlarmRoom() {
             byName: authState.user.displayName || authState.user.email?.split('@')[0] || 'Member',
             pushed: result.pushed,
             total: result.total,
+            notificationsSent: result.notificationsSent || 0,
             stale: result.stale || 0,
             platforms: result.platforms || {},
           }).catch((error) => console.warn('Could not record push history:', error?.message || error))
           message =
             result.total === 0
               ? 'Alarm triggered — no other devices have alerts enabled'
-              : `Alarm sent to ${result.pushed} of ${result.total} device${result.total === 1 ? '' : 's'}`
+              : `Sent ${result.notificationsSent || 0} alert${result.notificationsSent === 1 ? '' : 's'} to ${result.pushed} of ${result.total} device${result.total === 1 ? '' : 's'}`
         }
       }
-      flashToast(message, 3200)
+      flashToast(message, 3600)
     } catch (err) {
       console.error('Failed to trigger alarm:', err)
       flashToast('Could not trigger the alarm', 3200)
@@ -347,6 +419,8 @@ function AlarmRoom() {
     if (pushState === 'enabled') {
       await disablePush(roomId)
       setPushState('idle')
+      // A later re-enable asks for camera consent again (if not yet given).
+      setConsentDismissed(false)
       setToast('Device alerts disabled')
       return
     }
@@ -354,7 +428,11 @@ function AlarmRoom() {
     try {
       const result = await enablePush(roomId, authState.user)
       setPushState(result.status)
-      if (result.status === 'enabled') setToast('Device alerts enabled')
+      if (result.status === 'enabled') {
+        setToast('Device alerts enabled')
+        // First-time enable: if the member has not consented to camera
+        // check-ins yet, the consent dialog shows next.
+      }
     } catch (err) {
       console.error('Failed to enable push:', err)
       setPushState('error')
@@ -659,7 +737,9 @@ function AlarmRoom() {
                   <span className="push-time">{timeAgo(p.at)}</span>
                 </div>
                 <span className="push-result">
-                  Sent to {p.pushed} of {p.total} device{p.total === 1 ? '' : 's'}
+                  {p.notificationsSent
+                    ? `Sent ${p.notificationsSent} alert${p.notificationsSent === 1 ? '' : 's'} to ${p.pushed} of ${p.total} device${p.total === 1 ? '' : 's'}`
+                    : `Sent to ${p.pushed} of ${p.total} device${p.total === 1 ? '' : 's'}`}
                   {platformBreakdown(p.platforms)}
                   {p.stale > 0 ? ` · ${p.stale} stale pruned` : ''}
                 </span>
@@ -673,11 +753,70 @@ function AlarmRoom() {
         </div>
       )}
 
+      {checkins.length > 0 && (
+        <div className="card checkins-card">
+          <h3>Recent check-ins <span className="member-count">{checkins.length}</span></h3>
+          <ul className="checkin-list">
+            {checkins.map((c) => {
+              const member = room.memberProfiles?.[c.uid]
+              const name = member?.name || c.uid.slice(0, 6)
+              return (
+                <li className="checkin-row" key={c.id}>
+                  <MemberAvatar name={name} photoURL={member?.photoURL} />
+                  <div className="checkin-main">
+                    <div className="checkin-head">
+                      <span className="checkin-who">
+                        {name}
+                        {c.triggeredByNotification && <span className="badge">via notification</span>}
+                      </span>
+                      <span className="checkin-time">{timeAgo(c.timestamp)}</span>
+                    </div>
+                    <div className="checkin-photos">
+                      {(c.photoUrls || []).map((url, i) => (
+                        <a key={`${url}-${i}`} href={url} target="_blank" rel="noreferrer">
+                          <img
+                            src={url}
+                            alt={`${name}'s check-in photo ${i + 1}`}
+                            loading="lazy"
+                            className="checkin-thumb"
+                          />
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                </li>
+              )
+            })}
+          </ul>
+          <p className="muted small">
+            Front-camera photos captured when a consenting member opened the app.
+          </p>
+        </div>
+      )}
+
       <div className="controls trigger-controls">
         {!roomActive && (
-          <button className="btn btn-alarm btn-lg" onClick={handleTrigger} disabled={removing}>
-            <span aria-hidden="true">🚨</span> Trigger Alarm
-          </button>
+          <div className="burst-wrap">
+            <div className="burst-row">
+              <span className="burst-label">Repeats per device</span>
+              <div className="burst-opts" role="radiogroup" aria-label="Repeats per device">
+                {[1, 3, 5, 10].map((n) => (
+                  <button
+                    key={n}
+                    className={`burst-opt${burstCount === n ? ' active' : ''}`}
+                    aria-pressed={burstCount === n}
+                    onClick={() => setBurstCount(n)}
+                    type="button"
+                  >
+                    {n}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <button className="btn btn-alarm btn-lg" onClick={handleTrigger} disabled={removing}>
+              <span aria-hidden="true">🚨</span> Trigger Alarm
+            </button>
+          </div>
         )}
         {isTriggerer && roomActive && (
           <button className="btn btn-stop btn-lg" onClick={handleStop}>
@@ -690,6 +829,41 @@ function AlarmRoom() {
         <span className="status-dot" aria-hidden="true" />
         {statusText}
       </p>
+
+      {showConsentDialog && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="consent-title">
+          <div className="card consent-card">
+            <span className="consent-icon" aria-hidden="true">📷</span>
+            <h3 id="consent-title">Camera check-ins</h3>
+            <p className="muted">
+              You enabled device alerts for this room. To leave a visible confirmation trail, opening this
+              app — including by tapping an alarm notification — will take a few photos with the front
+              camera and upload them so other room members can see them as your check-in.
+            </p>
+            {!cameraCaptureSupported() && (
+              <p className="muted small">
+                This device has no camera access available right now; consent is still recorded for when it does.
+              </p>
+            )}
+            <div className="controls">
+              <button
+                className="btn btn-primary"
+                onClick={() => handleCameraConsent(true)}
+                disabled={consentSaving}
+              >
+                {consentSaving ? 'Saving…' : 'I agree'}
+              </button>
+              <button
+                className="btn btn-ghost"
+                onClick={() => handleCameraConsent(false)}
+                disabled={consentSaving}
+              >
+                Not now
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <Toast message={toast} />
 

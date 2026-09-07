@@ -666,3 +666,139 @@ input:focus {
   overflow: auto;
 }
 .alerts-card .btn-ghost.btn-sm { margin-top: 12px; }
+
+/* ───────────────────────── Camera consent dialog ───────────────────────── */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(10, 6, 20, 0.6);
+  backdrop-filter: blur(4px);
+  animation: fade-up 0.25s ease both;
+}
+
+.consent-card {
+  width: min(440px, 100%);
+  align-items: stretch;
+  text-align: left;
+  animation: pop-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.consent-icon {
+  font-size: 34px;
+  line-height: 1;
+  text-align: center;
+}
+
+.consent-card h3 { text-align: center; }
+.consent-card .muted { max-width: none; }
+.consent-card .muted.small { font-size: 12.5px; }
+.consent-card .controls { justify-content: center; }
+
+/* ───────────────────────── Burst selector ───────────────────────── */
+
+.burst-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+.burst-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.burst-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.burst-opts {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 999px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+.burst-opt {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  min-width: 34px;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.burst-opt:hover { color: var(--text-h); }
+
+.burst-opt.active {
+  background: var(--accent-grad);
+  color: #fff;
+  box-shadow: 0 4px 12px -4px rgba(139, 47, 247, 0.6);
+}
+
+/* ───────────────────────── Check-ins card ───────────────────────── */
+
+.checkins-card { text-align: left; }
+.checkin-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.checkin-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+.checkin-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.checkin-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.checkin-who { font-weight: 600; color: var(--text-h); font-size: 13px; display: flex; align-items: center; gap: 6px; }
+.checkin-time { font-size: 11px; color: var(--text); flex-shrink: 0; }
+
+.checkin-photos {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.checkin-thumb {
+  width: 72px;
+  height: 72px;
+  border-radius: 10px;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  cursor: zoom-in;
+  transition: transform 0.15s ease, box-shadow 0.2s ease;
+}
+
+.checkin-thumb:hover {
+  transform: scale(1.06);
+  box-shadow: var(--shadow);
+}
+
+.checkins-card .muted.small { margin-top: 10px; }
