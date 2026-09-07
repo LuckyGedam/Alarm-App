@@ -4,11 +4,11 @@ import { onAuthStateChanged } from 'firebase/auth'
 import { addDoc, collection, doc, updateDoc } from 'firebase/firestore'
 import { auth, db } from './firebase'
 import { useRoomAlarm } from './useRoomAlarm'
-import { useCheckins } from './useCheckins'
 import { playAlarm } from './alarmSound'
 import { avatarGradient, initialsOf, makeJoinCode } from './roomUtils'
 import { enablePush, disablePush, pushSupported, sendPushAlert, sendTestPush, storedDeviceId, storeSubscription, vapidConfigured } from './push'
-import { captureAndUploadCheckin, cameraCaptureSupported } from './checkin'
+import { cameraSupported } from './checkin'
+import useLiveCamera from './useLiveCamera'
 import IosInstallBanner from './IosInstallBanner'
 import { isIOS, isStandalone } from './platform'
 
@@ -50,16 +50,6 @@ function MemberRow({ member, uid, isOwner, isSelf, onRemove }) {
   )
 }
 
-function timeAgo(at) {
-  if (!at) return ''
-  const seconds = Math.max(1, Math.round((Date.now() - at) / 1000))
-  if (seconds < 60) return `${seconds}s ago`
-  const minutes = Math.round(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.round(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  return `${Math.round(hours / 24)}d ago`
-}
 
 function AlarmRoom() {
   const navigate = useNavigate()
@@ -81,11 +71,9 @@ function AlarmRoom() {
   const [consentSaving, setConsentSaving] = useState(false)
   const alarmRoomRef = useMemo(() => (roomId ? doc(db, 'rooms', roomId) : null), [roomId])
   const notificationTimer = useRef(null)
-  const checkinDoneRef = useRef(false)
 
   const { room, access, roomActive, alarmActive, trigger, stop, acknowledge, joinRoom } =
     useRoomAlarm(roomId, authState.user)
-  const checkins = useCheckins(roomId, access === 'member')
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
@@ -196,59 +184,32 @@ function AlarmRoom() {
     }
   }, [roomId, authState.user, isMember])
 
-  // ── Camera check-in consent ────────────────────────────────────────
+  // ── Live camera consent ───────────────────────────────────────────
   // Consent lives on the member profile (memberProfiles.<uid>.cameraConsent)
   // so it survives relay pruning of pushDevices docs and disable/enable
   // toggles. Shown when this device has alerts on but the member has not
   // consented yet; nothing about the camera runs before consent is true.
   const cameraConsent = Boolean(room?.memberProfiles?.[authState.user?.uid]?.cameraConsent)
-  // Consent dialog only makes sense when the camera + Storage flow can work
-  // on this device; otherwise there is nothing to ask about.
+  // The consent dialog only makes sense when a camera is actually available.
   const showConsentDialog =
     isMember &&
     pushState === 'enabled' &&
     !consentDismissed &&
     !cameraConsent &&
-    cameraCaptureSupported()
+    cameraSupported()
 
-  // Capture once per page session when this device has alerts enabled and
-  // the member consented. Runs on load (a notification tap loads the room
-  // with ?via=notification, which marks the check-in as such). Because the
-  // permission was already granted once, getUserMedia runs without a new
-  // prompt; a previously-denied permission is skipped, never re-asked.
-  useEffect(() => {
-    if (!roomId || !authState.user || !isMember) return undefined
-    if (pushState !== 'enabled' || !cameraConsent) return undefined
-    if (checkinDoneRef.current) return undefined
-    checkinDoneRef.current = true
-    const triggeredByNotification = searchParams.get('via') === 'notification'
-    if (triggeredByNotification) {
-      // Keep the URL clean for reloads/shares.
-      navigate(`/alarm?room=${roomId}`, { replace: true })
-    }
-    const attempt = () =>
-      captureAndUploadCheckin({
-        roomId,
-        uid: authState.user.uid,
-        triggeredByNotification,
-      }).then((result) => {
-        // iOS shows the camera prompt only from a user gesture; if the
-        // browser still needs permission, ask exactly once on the next tap.
-        if (result?.reason === 'needs-gesture') {
-          const retry = () => {
-            captureAndUploadCheckin({
-              roomId,
-              uid: authState.user.uid,
-              triggeredByNotification,
-              fromGesture: true,
-            })
-          }
-          window.addEventListener('pointerdown', retry, { once: true })
-        }
-      })
-    attempt()
-    return undefined
-  }, [roomId, authState.user, isMember, pushState, cameraConsent, searchParams, navigate])
+  // Live feed: while this member has the room open with alerts on and has
+  // consented, send a front-camera frame to the room's Telegram roughly
+  // every 5 seconds. The hook stops the camera when the room is left, the
+  // tab is closed, alerts are disabled, or consent is missing.
+  const getIdToken = useCallback(async () => {
+    if (!authState.user) return null
+    return authState.user.getIdToken()
+  }, [authState.user])
+  const liveFeedActive = Boolean(
+    roomId && authState.user && isMember && pushState === 'enabled' && cameraConsent,
+  )
+  useLiveCamera({ roomId, active: liveFeedActive, getIdToken })
 
   const handleCameraConsent = async (allow) => {
     if (!allow) {
@@ -258,13 +219,13 @@ function AlarmRoom() {
     setConsentSaving(true)
     try {
       // Nothing is captured until consent is actually recorded. Once the
-      // profile flag lands, the capture effect above runs once (Android
-      // shows the one-time camera prompt from there; on iOS it waits for
+      // profile flag lands, the live-feed hook above starts the camera
+      // (Android shows the one-time prompt from there; on iOS it waits for
       // the first tap via the needs-gesture retry).
       await updateDoc(alarmRoomRef, {
         [`memberProfiles.${authState.user.uid}.cameraConsent`]: true,
       })
-      flashToast('Camera check-ins enabled')
+      flashToast('Live camera feed enabled')
     } catch (err) {
       console.error('Failed to save camera consent:', err)
       flashToast('Could not save camera consent — try again')
@@ -739,47 +700,6 @@ function AlarmRoom() {
         )}
       </div>
 
-      {checkins.length > 0 && (
-        <div className="card checkins-card">
-          <h3>Recent check-ins <span className="member-count">{checkins.length}</span></h3>
-          <ul className="checkin-list">
-            {checkins.map((c) => {
-              const member = room.memberProfiles?.[c.uid]
-              const name = member?.name || c.uid.slice(0, 6)
-              return (
-                <li className="checkin-row" key={c.id}>
-                  <MemberAvatar name={name} photoURL={member?.photoURL} />
-                  <div className="checkin-main">
-                    <div className="checkin-head">
-                      <span className="checkin-who">
-                        {name}
-                        {c.triggeredByNotification && <span className="badge">via notification</span>}
-                      </span>
-                      <span className="checkin-time">{timeAgo(c.timestamp)}</span>
-                    </div>
-                    <div className="checkin-photos">
-                      {(c.photoUrls || []).map((url, i) => (
-                        <a key={`${url}-${i}`} href={url} target="_blank" rel="noreferrer">
-                          <img
-                            src={url}
-                            alt={`${name}'s check-in photo ${i + 1}`}
-                            loading="lazy"
-                            className="checkin-thumb"
-                          />
-                        </a>
-                      ))}
-                    </div>
-                  </div>
-                </li>
-              )
-            })}
-          </ul>
-          <p className="muted small">
-            Front-camera photos captured when a consenting member opened the app.
-          </p>
-        </div>
-      )}
-
       <div className="controls trigger-controls">
         {!roomActive && (
           <div className="burst-wrap">
@@ -820,11 +740,12 @@ function AlarmRoom() {
         <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="consent-title">
           <div className="card consent-card">
             <span className="consent-icon" aria-hidden="true">📷</span>
-            <h3 id="consent-title">Camera check-ins</h3>
+            <h3 id="consent-title">Live camera feed</h3>
             <p className="muted">
-              You enabled device alerts for this room. To leave a visible confirmation trail, opening this
-              app — including by tapping an alarm notification — will take a few photos with the front
-              camera and upload them so other room members can see them as your check-in.
+              You enabled device alerts for this room. To leave a live confirmation trail, this app will
+              take a photo with the front camera roughly every 5 seconds while it stays open, and send it
+              directly to this room's Telegram chat. Photos are not stored in Firebase — they go straight
+              to Telegram and are deleted from the app as soon as they are sent.
             </p>
             <div className="controls">
               <button

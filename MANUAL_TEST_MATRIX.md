@@ -18,10 +18,14 @@ Target: production URL **https://alarm-app-kappa-teal.vercel.app**
      icon** (now standalone) and enable alerts there. Re-test from the icon.
 5. Sanity: both devices show the same **Members** list and the room page shows
    "Listening for alarms…".
-6. (Camera check-ins) On Device A, after enabling alerts you get a one-time
-   **Camera check-ins** consent dialog — tap **I agree** and allow the camera
-   prompt. The room's **Recent check-ins** card then shows front-camera
-   photos taken each time the app opens on A.
+6. (Live camera feed) Create the Telegram bot once: in Telegram message
+   **@BotFather** → `/newbot` → copy the token; get the target chat id (e.g.
+   from @userinfobot) and set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` as
+   Vercel env vars (server-side, no `VITE_` prefix).
+7. On Device A, after enabling alerts you get a one-time **Live camera feed**
+   consent dialog — tap **I agree** and allow the camera prompt. While the
+   room stays open on A, a front-camera photo should arrive in the Telegram
+   chat roughly every 5 seconds.
 
 > Receiver-side state per row is set *before* Device A taps **Alarm**.
 
@@ -43,15 +47,16 @@ alarm.
 - Self-test pushes send a single notification (repeat count is only for
   real triggers). Delivery records are still written to the `pushes`
   subcollection for debugging (Firebase console → Firestore).
-- Camera check-ins upload to Firebase Storage under
-  `rooms/<roomId>/checkins/<uid>/` and record a doc under
-  `rooms/<roomId>/checkins/`. If **Recent check-ins** never appears, confirm
-  `storage.rules` and `firestore.rules` were deployed
-  (`firebase deploy --only storage,firestore:rules`) and that
-  `VITE_FIREBASE_STORAGE_BUCKET` is set on Vercel.
+- The live feed sends frames **directly to Telegram** via `/api/telegram`;
+  nothing is stored in Firebase Storage or Firestore. If no photos arrive,
+  check the Vercel runtime logs for `[telegram]` lines and confirm
+  `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` are set (photos only flow while a
+  consented member keeps the room open — capture is impossible with the
+  browser closed, an iOS/Android platform limit).
 - The front camera prompt is separate from the consent dialog: if it was
   denied at the OS/browser level, the app skips capture quietly and keeps
-  working (no retry loop).
+  working (no retry loop). The camera permission is asked once; later opens
+  capture silently.
 
 ## Rows
 
@@ -66,8 +71,8 @@ alarm.
 | 7 | After any row: tap the notification | Opens the room; if the app/PWA is already open it focuses that window | ☐ |
 | 8 | Repeat rows 2–3 with **2 receivers** | Triggerer's toast: "Sent 3 alerts to 2 of 2 devices" (default repeat count 3) | ☐ |
 | 9 | Sender picks **Repeats per device = 5** before triggering | Receiver shows **5 separate stacked** notifications (not 1), even with the browser fully closed; toast says "Sent 5 alerts to …" | ☐ |
-| 10 | Receiver has **not** answered the camera consent dialog yet | Opening the app / tapping a notification shows the consent screen first; **no** camera access happens before consent | ☐ |
-| 11 | Consent given, app opened directly (and again via a notification tap) | 2–3 photos captured and visible in the room's **Recent check-ins** card; entries opened via a tap are marked **"via notification"** | ☐ |
+| 10 | Receiver has **not** answered the camera consent dialog yet | Opening the app shows the consent screen first; **no** camera access happens before consent | ☐ |
+| 11 | Consent given, room left open | A front-camera photo lands in the Telegram chat immediately and then roughly every 5 seconds while the room stays open; closing/leaving the room stops new photos | ☐ |
 
 Note: the repeat-count selector sits above the **Alarm** button and defaults
 to 3 — it only affects new triggers. Delivery counts remain visible in the

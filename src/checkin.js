@@ -1,45 +1,28 @@
-// Foreground "check-in" photo capture.
+// Front-camera utilities for the live-to-Telegram feed.
 //
-// Scope: only runs while the app is open / foreground (a fresh page load, or
-// brought to the foreground by tapping a notification). True background
-// capture with the browser fully closed is blocked by iOS and Android at the
-// OS level and is not attempted here.
+// While the room page is open (and the member consented), the app captures a
+// front-camera JPEG roughly every 5 seconds and posts it to /api/telegram,
+// which relays it to the room's Telegram chat. Frames go straight to
+// Telegram — nothing is written to Firebase Storage or Firestore.
 //
 // Capture is gated by explicit per-(user, room) consent stored as
-// `memberProfiles.<uid>.cameraConsent` — nothing in this module runs before
-// that flag is true. Frames are drawn to an offscreen <canvas>, uploaded to
-// Firebase Storage under rooms/<roomId>/checkins/<uid>/, and a Firestore doc
-// under rooms/<roomId>/checkins/ records the URLs so the whole room can see
-// the confirmation trail.
-import { addDoc, collection } from 'firebase/firestore'
-import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage'
-import { db, storage } from './firebase'
+// `memberProfiles.<uid>.cameraConsent`; the browser-level camera permission
+// is asked once and then respected (granted → capture silently, denied →
+// never prompt again).
 
-const FRAMES = 3
-const FRAME_GAP_MS = 450
+const FRAME_QUALITY = 0.7
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function stopStream(stream) {
-  stream?.getTracks().forEach((track) => track.stop())
-}
-
-/** True when this browser can plausibly capture (camera API + Storage bucket). */
-export function cameraCaptureSupported() {
+/** True when this browser exposes getUserMedia (camera API). */
+export function cameraSupported() {
   return Boolean(
     typeof navigator !== 'undefined' &&
-      navigator.mediaDevices?.getUserMedia &&
-      storage,
+      navigator.mediaDevices?.getUserMedia,
   )
 }
 
 /**
  * Current OS/browser camera permission for this origin, when the Permissions
- * API exposes it (Chrome/Edge/Android; Safari returns 'unknown'). This lets
- * us skip prompting entirely once the user has answered — granted opens
- * capture silently, and a denied permission is never re-prompted.
+ * API exposes it (Chrome/Edge/Android; Safari returns 'unknown').
  *
  * @returns {Promise<'granted'|'denied'|'prompt'|'unknown'>}
  */
@@ -55,120 +38,47 @@ export async function cameraPermissionState() {
   return 'unknown'
 }
 
+/** Draw the current frame of a playing <video> element to a JPEG blob. */
+export function snapVideoFrame(video) {
+  return new Promise((resolve) => {
+    try {
+      const canvas = document.createElement('canvas')
+      const context = canvas.getContext('2d')
+      const width = video.videoWidth || 640
+      const height = video.videoHeight || 480
+      canvas.width = width
+      canvas.height = height
+      context.drawImage(video, 0, 0, width, height)
+      canvas.toBlob(resolve, 'image/jpeg', FRAME_QUALITY)
+    } catch {
+      resolve(null)
+    }
+  })
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result).split(',')[1] || '')
+    reader.onerror = () => reject(reader.error)
+    reader.readAsDataURL(blob)
+  })
+}
+
 /**
- * Take 2–3 front-camera photos a few hundred ms apart, upload them to
- * Storage, and record one Firestore check-in doc with their URLs.
- *
- * Only `video` is requested (audio: false) — this should prompt for the
- * CAMERA alone. Never throws — camera failures (denied/unavailable) return
- * { ok: false, reason } so the caller can skip silently. Callers must not
- * retry in a loop.
- *
- * @returns {Promise<{ok: boolean, photos?: number, reason?: string}>}
+ * Upload one JPEG frame to the room's Telegram feed via /api/telegram.
+ * Throws on relay errors so the caller can decide how loudly to complain.
  */
-export async function captureAndUploadCheckin({
-  roomId,
-  uid,
-  triggeredByNotification = false,
-  fromGesture = false,
-}) {
-  if (!cameraCaptureSupported()) return { ok: false, reason: 'unsupported' }
-
-  // When called from a user gesture (the consent tap) getUserMedia is invoked
-  // FIRST — before any await — because Safari/iOS only shows the camera
-  // prompt while the gesture is still fresh. On the auto-capture-on-open path
-  // we instead check the saved permission first so we never re-prompt: a
-  // 'granted' permission captures silently and a 'denied' one is skipped.
-  let permission = 'unknown'
-  if (!fromGesture) {
-    permission = await cameraPermissionState()
-    if (permission === 'denied') {
-      console.warn('Check-in camera permission is blocked — skipping capture. Re-enable it in the site settings if wanted.')
-      return { ok: false, reason: 'denied', permissionState: permission }
-    }
+export async function sendFrameToTelegram(blob, { roomId, idToken }) {
+  const image = await blobToBase64(blob)
+  const response = await fetch('/api/telegram', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ image, roomId, idToken }),
+  })
+  if (!response.ok) {
+    const detail = (await response.text().catch(() => '')).slice(0, 160)
+    throw new Error(`Telegram relay answered ${response.status} ${detail}`)
   }
-
-  let stream
-  try {
-    // Only `video` is requested; there is no microphone involved.
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
-    })
-  } catch (error) {
-    // Safari/iOS only shows the camera prompt from a user gesture, so a
-    // NotAllowedError while permission is still unknown (non-gesture path)
-    // usually means "no gesture yet" — report it so the caller can retry
-    // once on the next tap instead of failing forever. A gesture-path
-    // rejection means the user actually denied the prompt.
-    if (!fromGesture && error?.name === 'NotAllowedError' && permission === 'unknown') {
-      return { ok: false, reason: 'needs-gesture', permissionState: permission }
-    }
-    console.warn('Check-in camera unavailable:', error?.name || error?.message || error)
-    return { ok: false, reason: 'denied', permissionState: permission }
-  }
-
-  const video = document.createElement('video')
-  video.muted = true
-  video.playsInline = true
-  video.srcObject = stream
-
-  try {
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('camera start timed out')), 8000)
-      video.onloadedmetadata = () => {
-        clearTimeout(timer)
-        resolve()
-      }
-      video.onerror = () => {
-        clearTimeout(timer)
-        reject(new Error('video element error'))
-      }
-      video.play().catch((error) => {
-        clearTimeout(timer)
-        reject(error)
-      })
-    })
-    // Give the decoder a moment to produce an actual frame before drawing.
-    await sleep(250)
-
-    const canvas = document.createElement('canvas')
-    const context = canvas.getContext('2d')
-    const snap = () =>
-      new Promise((resolve) => {
-        const width = video.videoWidth || 640
-        const height = video.videoHeight || 480
-        canvas.width = width
-        canvas.height = height
-        context.drawImage(video, 0, 0, width, height)
-        canvas.toBlob(resolve, 'image/jpeg', 0.8)
-      })
-
-    const startedAt = Date.now()
-    const urls = []
-    for (let i = 0; i < FRAMES; i += 1) {
-      if (i > 0) await sleep(FRAME_GAP_MS)
-      const blob = await snap()
-      if (!blob) continue
-      const fileRef = storageRef(storage, `rooms/${roomId}/checkins/${uid}/${startedAt}-${i}.jpg`)
-      await uploadBytes(fileRef, blob, { contentType: 'image/jpeg' })
-      urls.push(await getDownloadURL(fileRef))
-    }
-
-    if (!urls.length) return { ok: false, reason: 'no-frames' }
-
-    await addDoc(collection(db, 'rooms', roomId, 'checkins'), {
-      uid,
-      timestamp: new Date(),
-      photoUrls: urls,
-      triggeredByNotification: Boolean(triggeredByNotification),
-    })
-    return { ok: true, photos: urls.length }
-  } catch (error) {
-    console.warn('Check-in capture failed:', error?.name || error?.message || error)
-    return { ok: false, reason: 'error' }
-  } finally {
-    // Stop the camera immediately after capture — never leave it running.
-    stopStream(stream)
-  }
+  return response.json()
 }
