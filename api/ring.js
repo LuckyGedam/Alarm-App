@@ -5,6 +5,11 @@
 // caller's own ID token (so the security rules still apply — only members can
 // list devices), then sends a Web Push message to every other device.
 //
+// With `test: true` in the body the relay instead targets the CALLER's own
+// device(s) — the self-test mode used by the "Send test push" button — and
+// logs the delivery as `[ring] SELF-TEST …` to keep it apart from real
+// alarm deliveries in the runtime logs.
+//
 // Environment (server-side only):
 //   VITE_FIREBASE_PROJECT_ID, VITE_FIREBASE_API_KEY  — Firestore REST
 //   VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY              — web-push signing keys
@@ -53,7 +58,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' })
   }
 
-  const { roomId, uid, idToken, title, body, url } = req.body || {}
+  const { roomId, uid, idToken, title, body, url, test } = req.body || {}
   if (!roomId || !uid || !idToken) {
     return res.status(400).json({ error: 'roomId, uid and idToken are required' })
   }
@@ -85,22 +90,41 @@ export default async function handler(req, res) {
   }
 
   const data = await resp.json()
-  const devices = (data.documents || []).map((doc) => ({
+  const devices = (data.documents || []).map((doc) => {
     // The REST doc name ends with /pushDevices/<deviceId>.
-    deviceId: decodeURIComponent(doc.name.split('/').pop()),
-    ...decodeFields(doc.fields),
-  }))
+    const fields = decodeFields(doc.fields)
+    // src/push.js stores the subscription as a JSON string; web-push needs
+    // the parsed object (endpoint + keys). Unparseable data is skipped.
+    if (typeof fields.subscription === 'string') {
+      try {
+        fields.subscription = JSON.parse(fields.subscription)
+      } catch {
+        fields.subscription = null
+      }
+    }
+    return { deviceId: decodeURIComponent(doc.name.split('/').pop()), ...fields }
+  })
 
+  // Normal alarms target every OTHER member's device. A self-test (`test`
+  // flag) targets the caller's own device(s) instead, so a member can verify
+  // end-to-end delivery — stored subscription → relay → push service —
+  // without needing a second member to trigger an alarm.
   const targets = devices.filter(
-    (device) => device.uid && device.uid !== uid && device.subscription,
+    (device) =>
+      device.subscription &&
+      (test ? device.uid === uid : Boolean(device.uid) && device.uid !== uid),
   )
 
   const message = JSON.stringify({ title, body, url, roomId })
+  // Note: the per-device callback must REJECT on failure (not resolve with a
+  // status object) — Promise.allSettled wraps a resolved value as
+  // { status: 'fulfilled', value }, so an inner { status: 'rejected' } object
+  // would be counted as a successful push. Outer fulfilled == push accepted
+  // by the push service; outer rejected == push failed.
   const results = await Promise.allSettled(
     targets.map(async ({ deviceId, subscription }) => {
       try {
         await webpush.sendNotification(subscription, message)
-        return { status: 'fulfilled' }
       } catch (error) {
         const statusCode = error?.statusCode
         console.error(
@@ -113,13 +137,15 @@ export default async function handler(req, res) {
         if (statusCode === 404 || statusCode === 410) {
           await deleteDevice(projectId, apiKey, roomId, deviceId, idToken)
         }
-        return { status: 'rejected', reason: statusCode }
+        throw error
       }
     }),
   )
 
   const pushed = results.filter((r) => r.status === 'fulfilled').length
-  const stale = results.filter((r) => r.status === 'rejected' && (r.reason === 404 || r.reason === 410)).length
+  const stale = results.filter(
+    (r) => r.status === 'rejected' && (r.reason?.statusCode === 404 || r.reason?.statusCode === 410),
+  ).length
 
   // Per-platform breakdown (allSettled keeps result order aligned with targets).
   const platforms = {}
@@ -130,8 +156,9 @@ export default async function handler(req, res) {
     if (results[index]?.status === 'fulfilled') entry.pushed += 1
   })
 
+  const mode = test ? 'SELF-TEST' : 'ALARM'
   console.error(
-    `[ring] room ${roomId} by ${uid}: pushed ${pushed}/${targets.length} devices` +
+    `[ring] ${mode} room ${roomId} by ${uid}: pushed ${pushed}/${targets.length} devices` +
       (stale ? ` (${stale} stale pruned)` : ''),
   )
 

@@ -21,6 +21,24 @@ Target: production URL **https://alarm-app-kappa-teal.vercel.app**
 
 > Receiver-side state per row is set *before* Device A taps **Trigger Alarm**.
 
+## Self-test first (one device, no second member needed)
+
+With alerts enabled on a device, open the room → **Device alerts** →
+**Send test push**. Expected: a "🔔 Test push" notification arrives on that
+device within a few seconds, and the toast reports "Test push sent to 1 of 1
+device". This verifies the full delivery chain — Firestore subscription →
+`/api/ring` → push service → service worker — without triggering a real
+alarm.
+
+- Toast "sent to 0 of 0 devices" = the browser has a subscription but it was
+  never stored in Firestore for this room (or was pruned as stale). Toggle
+  **Device alerts** off/on to re-store it, then re-test.
+- Toast "Test push failed" = the relay itself errored; check the Vercel
+  runtime logs for `[ring]` lines (the diagnostics button on the same card
+  covers the browser side, which is likely fine).
+- Test pushes are **not** written to **Recent pushes** — that log is reserved
+  for real alarm deliveries.
+
 ## Rows
 
 | # | Receiver state | Expected | Pass? |

@@ -126,12 +126,12 @@ export async function disablePush(roomId) {
  * @returns {Promise<{pushed:number,total:number,stale?:number}|null>}
  *   The relay's device counts when it answered, otherwise null.
  */
-export async function sendPushAlert({ roomId, uid, idToken, title, body, url }) {
+export async function sendPushAlert({ roomId, uid, idToken, title, body, url, test = false }) {
   try {
     const response = await fetch('/api/ring', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ roomId, uid, idToken, title, body, url }),
+      body: JSON.stringify({ roomId, uid, idToken, title, body, url, test }),
     })
     if (!response.ok) {
       console.warn('Push relay answered with an error:', response.status, (await response.text()).slice(0, 200))
@@ -142,4 +142,25 @@ export async function sendPushAlert({ roomId, uid, idToken, title, body, url }) 
     console.warn('Push relay failed (alarm still fires in-app):', error.message || error)
     return null
   }
+}
+
+/**
+ * Self-test: ask the relay to push to THIS device's stored subscription(s)
+ * (`test: true` makes /api/ring target the caller's own devices instead of
+ * everyone else's). Lets a member verify the full delivery chain — Firestore
+ * subscription → /api/ring → push service → service worker — without needing
+ * a second member to trigger a real alarm.
+ *
+ * @returns {Promise<{pushed:number,total:number,stale?:number}|null>}
+ */
+export async function sendTestPush({ roomId, uid, idToken }) {
+  return sendPushAlert({
+    roomId,
+    uid,
+    idToken,
+    title: '🔔 Test push',
+    body: 'Push delivery works end to end on this device.',
+    url: `${window.location.origin}/alarm?room=${roomId}`,
+    test: true,
+  })
 }

@@ -7,7 +7,7 @@ import { useRoomAlarm } from './useRoomAlarm'
 import { usePushHistory } from './usePushHistory'
 import { playAlarm } from './alarmSound'
 import { avatarGradient, initialsOf, makeJoinCode } from './roomUtils'
-import { enablePush, disablePush, pushSupported, sendPushAlert, storedDeviceId, vapidConfigured } from './push'
+import { enablePush, disablePush, pushSupported, sendPushAlert, sendTestPush, storedDeviceId, vapidConfigured } from './push'
 import IosInstallBanner from './IosInstallBanner'
 import { isIOS, isStandalone } from './platform'
 
@@ -81,6 +81,7 @@ function AlarmRoom() {
   const [toast, setToast] = useState('')
   const [diag, setDiag] = useState(null)
   const [diagRunning, setDiagRunning] = useState(false)
+  const [testingPush, setTestingPush] = useState(false)
   const [pushState, setPushState] = useState('idle') // idle | working | enabled | needs-permission | denied | unsupported | error
   const [removing, setRemoving] = useState(false)
   const alarmRoomRef = useMemo(() => (roomId ? doc(db, 'rooms', roomId) : null), [roomId])
@@ -360,6 +361,36 @@ function AlarmRoom() {
     }
   }
 
+  // Self-test: push to THIS device's own stored subscription so end-to-end
+  // delivery can be verified without a second member triggering a real alarm.
+  // `total === 0` means no pushDevices doc is on file for this user in this
+  // room — the one thing the browser diagnostics cannot see.
+  const handleTestPush = async () => {
+    if (!roomId || !authState.user || testingPush) return
+    setTestingPush(true)
+    try {
+      const idToken = await authState.user.getIdToken()
+      const result = await sendTestPush({ roomId, uid: authState.user.uid, idToken })
+      if (!result) {
+        flashToast('Test push failed — check the Vercel runtime logs for /api/ring', 3600)
+        return
+      }
+      if (result.total === 0) {
+        flashToast('No stored subscription for this device — disable and re-enable device alerts', 3600)
+        return
+      }
+      flashToast(
+        `Test push sent to ${result.pushed} of ${result.total} device${result.total === 1 ? '' : 's'} — check your notification`,
+        3600,
+      )
+    } catch (err) {
+      console.error('Test push failed:', err)
+      flashToast('Could not send the test push', 3200)
+    } finally {
+      setTestingPush(false)
+    }
+  }
+
   const handleRegenerateCode = async () => {
     const nextCode = makeJoinCode()
     try {
@@ -604,6 +635,11 @@ function AlarmRoom() {
           </p>
         )}
 
+        {pushState === 'enabled' && (
+          <button className="btn btn-ghost btn-sm" onClick={handleTestPush} disabled={testingPush}>
+            {testingPush ? 'Sending…' : '🔔 Send test push'}
+          </button>
+        )}
         <button className="btn btn-ghost btn-sm" onClick={runDiagnostics} disabled={diagRunning}>
           {diagRunning ? 'Running…' : '🔍 Run diagnostics'}
         </button>
