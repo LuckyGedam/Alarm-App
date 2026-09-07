@@ -36,10 +36,31 @@ export function cameraCaptureSupported() {
 }
 
 /**
+ * Current OS/browser camera permission for this origin, when the Permissions
+ * API exposes it (Chrome/Edge/Android; Safari returns 'unknown'). This lets
+ * us skip prompting entirely once the user has answered — granted opens
+ * capture silently, and a denied permission is never re-prompted.
+ *
+ * @returns {Promise<'granted'|'denied'|'prompt'|'unknown'>}
+ */
+export async function cameraPermissionState() {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.permissions?.query) {
+      const status = await navigator.permissions.query({ name: 'camera' })
+      return status.state
+    }
+  } catch {
+    // Permissions API does not expose camera (e.g. Safari) — unknown.
+  }
+  return 'unknown'
+}
+
+/**
  * Take 2–3 front-camera photos a few hundred ms apart, upload them to
  * Storage, and record one Firestore check-in doc with their URLs.
  *
- * Never throws — camera failures (denied/unavailable) return
+ * Only `video` is requested (audio: false) — this should prompt for the
+ * CAMERA alone. Never throws — camera failures (denied/unavailable) return
  * { ok: false, reason } so the caller can skip silently. Callers must not
  * retry in a loop.
  *
@@ -49,20 +70,42 @@ export async function captureAndUploadCheckin({
   roomId,
   uid,
   triggeredByNotification = false,
+  fromGesture = false,
 }) {
   if (!cameraCaptureSupported()) return { ok: false, reason: 'unsupported' }
 
+  // When called from a user gesture (the consent tap) getUserMedia is invoked
+  // FIRST — before any await — because Safari/iOS only shows the camera
+  // prompt while the gesture is still fresh. On the auto-capture-on-open path
+  // we instead check the saved permission first so we never re-prompt: a
+  // 'granted' permission captures silently and a 'denied' one is skipped.
+  let permission = 'unknown'
+  if (!fromGesture) {
+    permission = await cameraPermissionState()
+    if (permission === 'denied') {
+      console.warn('Check-in camera permission is blocked — skipping capture. Re-enable it in the site settings if wanted.')
+      return { ok: false, reason: 'denied', permissionState: permission }
+    }
+  }
+
   let stream
   try {
+    // Only `video` is requested; there is no microphone involved.
     stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
       video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
     })
   } catch (error) {
-    // Camera permission denied / no camera: skip quietly and keep the rest of
-    // the app working. No retry here — the caller decides whether to retry.
+    // Safari/iOS only shows the camera prompt from a user gesture, so a
+    // NotAllowedError while permission is still unknown (non-gesture path)
+    // usually means "no gesture yet" — report it so the caller can retry
+    // once on the next tap instead of failing forever. A gesture-path
+    // rejection means the user actually denied the prompt.
+    if (!fromGesture && error?.name === 'NotAllowedError' && permission === 'unknown') {
+      return { ok: false, reason: 'needs-gesture', permissionState: permission }
+    }
     console.warn('Check-in camera unavailable:', error?.name || error?.message || error)
-    return { ok: false, reason: 'denied' }
+    return { ok: false, reason: 'denied', permissionState: permission }
   }
 
   const video = document.createElement('video')

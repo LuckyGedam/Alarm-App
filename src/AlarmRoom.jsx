@@ -202,13 +202,20 @@ function AlarmRoom() {
   // toggles. Shown when this device has alerts on but the member has not
   // consented yet; nothing about the camera runs before consent is true.
   const cameraConsent = Boolean(room?.memberProfiles?.[authState.user?.uid]?.cameraConsent)
-  const showConsentDialog = isMember && pushState === 'enabled' && !consentDismissed && !cameraConsent
+  // Consent dialog only makes sense when the camera + Storage flow can work
+  // on this device; otherwise there is nothing to ask about.
+  const showConsentDialog =
+    isMember &&
+    pushState === 'enabled' &&
+    !consentDismissed &&
+    !cameraConsent &&
+    cameraCaptureSupported()
 
   // Capture once per page session when this device has alerts enabled and
   // the member consented. Runs on load (a notification tap loads the room
-  // with ?via=notification, which marks the check-in as such). Camera
-  // failures (denied/unavailable) are skipped inside captureAndUploadCheckin
-  // and never retried in a loop.
+  // with ?via=notification, which marks the check-in as such). Because the
+  // permission was already granted once, getUserMedia runs without a new
+  // prompt; a previously-denied permission is skipped, never re-asked.
   useEffect(() => {
     if (!roomId || !authState.user || !isMember) return undefined
     if (pushState !== 'enabled' || !cameraConsent) return undefined
@@ -219,11 +226,27 @@ function AlarmRoom() {
       // Keep the URL clean for reloads/shares.
       navigate(`/alarm?room=${roomId}`, { replace: true })
     }
-    captureAndUploadCheckin({
-      roomId,
-      uid: authState.user.uid,
-      triggeredByNotification,
-    })
+    const attempt = () =>
+      captureAndUploadCheckin({
+        roomId,
+        uid: authState.user.uid,
+        triggeredByNotification,
+      }).then((result) => {
+        // iOS shows the camera prompt only from a user gesture; if the
+        // browser still needs permission, ask exactly once on the next tap.
+        if (result?.reason === 'needs-gesture') {
+          const retry = () => {
+            captureAndUploadCheckin({
+              roomId,
+              uid: authState.user.uid,
+              triggeredByNotification,
+              fromGesture: true,
+            })
+          }
+          window.addEventListener('pointerdown', retry, { once: true })
+        }
+      })
+    attempt()
     return undefined
   }, [roomId, authState.user, isMember, pushState, cameraConsent, searchParams, navigate])
 
@@ -234,10 +257,14 @@ function AlarmRoom() {
     }
     setConsentSaving(true)
     try {
+      // Nothing is captured until consent is actually recorded. Once the
+      // profile flag lands, the capture effect above runs once (Android
+      // shows the one-time camera prompt from there; on iOS it waits for
+      // the first tap via the needs-gesture retry).
       await updateDoc(alarmRoomRef, {
         [`memberProfiles.${authState.user.uid}.cameraConsent`]: true,
       })
-      flashToast('Camera check-ins enabled — opening the app will capture a few photos for the room')
+      flashToast('Camera check-ins enabled')
     } catch (err) {
       console.error('Failed to save camera consent:', err)
       flashToast('Could not save camera consent — try again')
@@ -799,11 +826,6 @@ function AlarmRoom() {
               app — including by tapping an alarm notification — will take a few photos with the front
               camera and upload them so other room members can see them as your check-in.
             </p>
-            {!cameraCaptureSupported() && (
-              <p className="muted small">
-                This device has no camera access available right now; consent is still recorded for when it does.
-              </p>
-            )}
             <div className="controls">
               <button
                 className="btn btn-primary"
