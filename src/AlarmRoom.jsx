@@ -7,7 +7,7 @@ import { useRoomAlarm } from './useRoomAlarm'
 import { usePushHistory } from './usePushHistory'
 import { playAlarm } from './alarmSound'
 import { avatarGradient, initialsOf, makeJoinCode } from './roomUtils'
-import { enablePush, disablePush, pushSupported, sendPushAlert, storedDeviceId } from './push'
+import { enablePush, disablePush, pushSupported, sendPushAlert, storedDeviceId, vapidConfigured } from './push'
 import IosInstallBanner from './IosInstallBanner'
 import { isIOS, isStandalone } from './platform'
 
@@ -79,6 +79,8 @@ function AlarmRoom() {
   const [joining, setJoining] = useState(false)
   const [joinError, setJoinError] = useState('')
   const [toast, setToast] = useState('')
+  const [diag, setDiag] = useState(null)
+  const [diagRunning, setDiagRunning] = useState(false)
   const [pushState, setPushState] = useState('idle') // idle | working | enabled | needs-permission | denied | unsupported | error
   const [removing, setRemoving] = useState(false)
   const alarmRoomRef = useMemo(() => (roomId ? doc(db, 'rooms', roomId) : null), [roomId])
@@ -294,6 +296,50 @@ function AlarmRoom() {
       console.error('Failed to stop alarm:', err)
       setToast('Could not stop the alarm')
     }
+  }
+
+  // One-tap diagnostics: prints the browser's exact push state so failures
+  // (blocked permission, missing SW, invalid VAPID, subscribe errors) can be
+  // identified without Vercel logs or DevTools.
+  const runDiagnostics = async () => {
+    setDiagRunning(true)
+    const out = {}
+    try {
+      out.userAgent = navigator.userAgent.slice(0, 140)
+      out.notificationPermission =
+        typeof Notification === 'undefined' ? 'unsupported' : Notification.permission
+      out.serviceWorkerApi = 'serviceWorker' in navigator
+      out.pushManagerApi = 'PushManager' in window
+      out.vapidKeyPresent = vapidConfigured()
+      out.pushSupported = pushSupported()
+      try {
+        const registration = await navigator.serviceWorker.getRegistration()
+        out.swRegistered = Boolean(registration)
+        out.swScope = registration?.scope || null
+        const subscription = await registration?.pushManager.getSubscription()
+        out.subscription = subscription
+          ? { endpoint: subscription.endpoint.slice(0, 90), expirationTime: subscription.expirationTime || null }
+          : null
+      } catch (error) {
+        out.swError = `${error?.name}: ${error?.message}`
+      }
+      if (out.notificationPermission === 'granted' && !out.subscription && pushSupported()) {
+        try {
+          const result = await enablePush(roomId, authState.user, { silent: true })
+          out.silentResubscribeResult = result.status
+          const subscription = await (await navigator.serviceWorker.getRegistration())?.pushManager.getSubscription()
+          out.subscription = subscription
+            ? { endpoint: subscription.endpoint.slice(0, 90), expirationTime: subscription.expirationTime || null }
+            : null
+        } catch (error) {
+          out.subscribeError = `${error?.name}: ${error?.message}`
+        }
+      }
+    } catch (error) {
+      out.unexpectedError = `${error?.name}: ${error?.message}`
+    }
+    setDiag(out)
+    setDiagRunning(false)
   }
 
   const handleTogglePush = async () => {
@@ -556,6 +602,13 @@ function AlarmRoom() {
             Web Push isn't available here — alarms still ring in the open tab, and the
             Notification API covers background tabs where the browser allows it.
           </p>
+        )}
+
+        <button className="btn btn-ghost btn-sm" onClick={runDiagnostics} disabled={diagRunning}>
+          {diagRunning ? 'Running…' : '🔍 Run diagnostics'}
+        </button>
+        {diag && (
+          <pre className="diag-output">{JSON.stringify(diag, null, 2)}</pre>
         )}
       </div>
 

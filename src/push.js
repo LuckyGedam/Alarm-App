@@ -22,6 +22,11 @@ export function pushSupported() {
   )
 }
 
+/** True when a VAPID public key was baked into this build (needed to subscribe). */
+export function vapidConfigured() {
+  return Boolean(VAPID_PUBLIC_KEY)
+}
+
 /** The stable per-browser device id used for the Firestore doc, if any. */
 export function storedDeviceId() {
   try {
