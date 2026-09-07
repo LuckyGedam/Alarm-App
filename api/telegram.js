@@ -80,8 +80,14 @@ export default async function handler(req, res) {
     })
     const payload = await telegramResponse.json().catch(() => ({}))
     if (!telegramResponse.ok || payload.ok !== true) {
+      // Mask the token (first 6 + last 4 chars) so a wrong/stale token is
+      // diagnosable from the logs without leaking it. A 404 "Not Found"
+      // means Telegram does not know this bot token at all.
+      const tokenHint = token ? `${token.slice(0, 6)}…${token.slice(-4)} (len ${token.length})` : '(missing)'
+      const chatHint = /^-?\d+$/.test(String(chatId)) ? `id ${chatId}` : `username/chat '${chatId}'`
       console.error(
-        `[telegram] sendPhoto failed: HTTP ${telegramResponse.status} ${JSON.stringify(payload).slice(0, 300)}`,
+        `[telegram] sendPhoto failed: HTTP ${telegramResponse.status} ${JSON.stringify(payload).slice(0, 300)} ` +
+          `(token ${tokenHint}, chat ${chatHint})`,
       )
       return res.status(502).json({ error: 'Telegram rejected the photo' })
     }
