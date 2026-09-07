@@ -769,4 +769,12 @@ input:focus {
   max-width: 100%;
 }
 
+.owner-live-state {
+  font-weight: 600;
+}
+
+.owner-live-state.on {
+  color: var(--green);
+}
+
 
