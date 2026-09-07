@@ -14,7 +14,7 @@
 // prompt from a user gesture, so if a non-gesture start is refused we retry
 // once on the next tap.
 import { useEffect, useRef } from 'react'
-import { cameraPermissionState, sendFrameToTelegram, snapVideoFrame } from './checkin'
+import { cameraPermissionState, probeTelegramHealth, sendFrameToTelegram, snapVideoFrame } from './checkin'
 
 const LIVE_INTERVAL_MS = 5000
 
@@ -34,6 +34,7 @@ export default function useLiveCamera({ roomId, active, getIdToken, onStatus }) 
     let stream = null
     let video = null
     let timer = null
+    let probeTimer = null
     let gestureRetryListener = null
     let wakeLock = null
     let lastErrorLog = 0
@@ -60,6 +61,8 @@ export default function useLiveCamera({ roomId, active, getIdToken, onStatus }) 
       disposed = true
       if (timer) clearInterval(timer)
       timer = null
+      if (probeTimer) clearTimeout(probeTimer)
+      probeTimer = null
       if (gestureRetryListener) {
         window.removeEventListener('pointerdown', gestureRetryListener)
         gestureRetryListener = null
@@ -112,7 +115,33 @@ export default function useLiveCamera({ roomId, active, getIdToken, onStatus }) 
       }
     }
 
-    const start = async (fromGesture = false) => {
+    // Probe the Telegram relay before touching the camera: there is no point
+    // turning the camera on (and asking for its permission) if the relay is
+    // misconfigured. While unhealthy, re-probe every 30 s so the feed resumes
+    // by itself once the owner fixes the Vercel env vars and redeploys.
+    const probe = async () => {
+      if (disposed) return
+      try {
+        const idToken = await getIdToken?.()
+        if (!idToken || disposed) return
+        const health = await probeTelegramHealth({ roomId, idToken })
+        if (!health.ok) {
+          const reason = ['notconfigured', 'badtoken', 'badchat', 'botblocked'].includes(health.reason)
+            ? health.reason
+            : 'relayerror'
+          report({ kind: reason, message: health.error })
+          probeTimer = setTimeout(probe, 30000)
+          return
+        }
+        startCamera()
+      } catch (error) {
+        logThrottled(`Telegram health probe failed: ${error?.message || error}`)
+        report({ kind: 'relayerror', message: String(error?.message || error).slice(0, 120) })
+        probeTimer = setTimeout(probe, 30000)
+      }
+    }
+
+    const startCamera = async (fromGesture = false) => {
       if (disposed) return
       report({ kind: 'starting' })
 
@@ -138,7 +167,7 @@ export default function useLiveCamera({ roomId, active, getIdToken, onStatus }) 
           report({ kind: 'waiting' })
           gestureRetryListener = () => {
             gestureRetryListener = null
-            start(true)
+            startCamera(true)
           }
           window.addEventListener('pointerdown', gestureRetryListener, { once: true })
           return
@@ -199,7 +228,7 @@ export default function useLiveCamera({ roomId, active, getIdToken, onStatus }) 
     }
 
     document.addEventListener('visibilitychange', onVisibility)
-    start()
+    probe()
 
     return cleanup
   }, [roomId, active, getIdToken])

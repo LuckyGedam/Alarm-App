@@ -73,6 +73,7 @@ alarm.
 | 9 | Sender picks **Repeats per device = 5** before triggering | Receiver shows **5 separate stacked** notifications (not 1), even with the browser fully closed; toast says "Sent 5 alerts to …" | ☐ |
 | 10 | Receiver has **not** answered the camera consent dialog yet | Opening the app shows the consent screen first; **no** camera access happens before consent | ☐ |
 | 11 | Consent given, room left open | A front-camera photo lands in the Telegram chat immediately and then roughly every 5 seconds while the room stays open; closing/leaving the room stops new photos | ☐ |
+| 12 | Telegram broken (no env vars, invalid token, or wrong chat id) | The live-feed card shows the **exact reason and fix** on the phone (e.g. "Telegram can't find this bot"), the camera is **not** started, and the app re-probes every ~30 s — after fixing the Vercel env var + redeploy the feed starts by itself within ~30 s without reopening the app | ☐ |
 
 Note: the repeat-count selector sits above the **Alarm** button and defaults
 to 3 — it only affects new triggers. Delivery counts remain visible in the
@@ -89,6 +90,20 @@ debugging.
    `pushed 2/2` with **no** failure lines.
 3. Triggerer's toast count should match the log count exactly (each alarm now
    logs `sent N notification(s) to X/Y devices`, where N = repeats × devices).
+
+## Checking Vercel Runtime Logs (Telegram feed, row 12)
+
+1. Same location as above (Vercel dashboard → your account → project →
+   Production deployment → Runtime Logs), filter by `telegram`.
+2. When the relay is healthy you'll see, once per room open:
+   `[telegram] health ok: bot @<username>, relay ready`, then a
+   `[telegram] photo sent to room <id>` line roughly every 5 seconds per
+   active device.
+3. On misconfiguration you'll see a `[telegram] health ok` line absent, and
+   either `[telegram] relay not configured (missing …)` or
+   `sendPhoto failed: HTTP 404 … (token <first6>…<last4> (len N), …)`.
+   The `(len N)` is a giveaway: a valid token is exactly 46 chars — anything
+   else (or a wrong prefix) means the token is wrong or has stray whitespace.
 
 ## If a row fails — what to capture
 

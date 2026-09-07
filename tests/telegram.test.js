@@ -159,3 +159,48 @@ test('trims whitespace around the bot token before calling Telegram', async () =
   assert.equal(status, 200)
   assert.ok(String(telegramCalls[0].url).includes('/bot123:test-token/sendPhoto'))
 })
+
+test('health probe reports not configured without sending anything', async () => {
+  Object.assign(process.env, {
+    VITE_FIREBASE_PROJECT_ID: ENV.VITE_FIREBASE_PROJECT_ID,
+    VITE_FIREBASE_API_KEY: ENV.VITE_FIREBASE_API_KEY,
+  })
+  const { status, body } = await callTelegram({ health: true, roomId: ROOM_ID, idToken: 'token-1' })
+  assert.equal(status, 200)
+  assert.equal(body.ok, false)
+  assert.equal(body.configured, false)
+  assert.equal(body.reason, 'notconfigured')
+  assert.equal(telegramCalls.length, 0)
+})
+
+test('health probe verifies token and chat via getChat', async () => {
+  Object.assign(process.env, ENV)
+  const { status, body } = await callTelegram({ health: true, roomId: ROOM_ID, idToken: 'token-1' })
+  assert.equal(status, 200)
+  assert.equal(body.ok, true)
+  assert.equal(body.chatOk, true)
+  assert.ok(String(telegramCalls[0].url).includes('/bot123:test-token/getChat'))
+  assert.ok(String(telegramCalls[0].url).includes('chat_id='))
+})
+
+test('health probe maps a 404 to an invalid bot token', async () => {
+  Object.assign(process.env, ENV)
+  telegramStatus = 404
+  telegramResponse = { ok: false, error_code: 404, description: 'Not Found' }
+  const { status, body } = await callTelegram({ health: true, roomId: ROOM_ID, idToken: 'token-1' })
+  assert.equal(status, 200)
+  assert.equal(body.ok, false)
+  assert.equal(body.reason, 'badtoken')
+  assert.ok(/token/i.test(String(body.error)))
+})
+
+test('health probe maps chat not found to a bad chat id', async () => {
+  Object.assign(process.env, ENV)
+  telegramStatus = 400
+  telegramResponse = { ok: false, description: 'chat not found' }
+  const { status, body } = await callTelegram({ health: true, roomId: ROOM_ID, idToken: 'token-1' })
+  assert.equal(status, 200)
+  assert.equal(body.ok, false)
+  assert.equal(body.reason, 'badchat')
+  assert.ok(/chat/i.test(String(body.error)))
+})

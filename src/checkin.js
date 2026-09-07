@@ -82,3 +82,26 @@ export async function sendFrameToTelegram(blob, { roomId, idToken }) {
   }
   return response.json()
 }
+
+/**
+ * Probe whether the room's Telegram relay is actually usable — validates the
+ * bot token AND the chat id server-side (one getChat call) before any photo
+ * is captured. Resolves to the server's health payload:
+ *   { ok: true }                              → relay works
+ *   { ok: false, configured, reason, error }  → notconfigured | badtoken |
+ *                                               badchat | botblocked, with a
+ *                                               human-readable fix in `error`
+ * Throws only on network/server failures.
+ */
+export async function probeTelegramHealth({ roomId, idToken }) {
+  const response = await fetch('/api/telegram', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ health: true, roomId, idToken }),
+  })
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    throw new Error(body?.error || `Telegram health check failed (${response.status})`)
+  }
+  return body
+}

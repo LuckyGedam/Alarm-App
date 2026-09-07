@@ -105,6 +105,13 @@ function LiveFeedStatus({ ownerLiveFeed, liveFeedActive, liveStatus, pushState }
             added to the chat (message it once first). Retrying automatically meanwhile.
           </p>
         )
+      case 'botblocked':
+        return (
+          <p className="error">
+            Telegram blocked this bot — add it to the chat and message it once first, then reopen the room.
+            Retrying automatically meanwhile.
+          </p>
+        )
       case 'paused':
         return (
           <p className="muted">
