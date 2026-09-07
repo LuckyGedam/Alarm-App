@@ -74,7 +74,7 @@ export default async function handler(req, res) {
     targets.map((subscription) =>
       webpush.sendNotification(
         subscription,
-        JSON.stringify({ title, body, url }),
+        JSON.stringify({ title, body, url, roomId }),
       ),
     ),
   )

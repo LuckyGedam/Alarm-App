@@ -82,20 +82,38 @@ function AlarmRoom() {
     return stopSound
   }, [alarmActive])
 
-  // Background-tab alert: Notification API when the tab is hidden. Web Push
-  // (service worker) covers the page being closed entirely.
+  // Background-tab alert: Notification API when the tab is hidden AND this
+  // device has no Web Push subscription. When push is subscribed, the service
+  // worker shows the notification for background/closed pages itself, so an
+  // in-tab notification would just duplicate it. Both share the same tag
+  // (`alarm-${roomId}`), so even if they race the browser collapses them.
   useEffect(() => {
     if (!alarmActive || typeof Notification === 'undefined') return undefined
     if (Notification.permission !== 'granted') return undefined
-    const show = () => {
-      if (document.hidden) {
-        const n = new Notification('🚨 ALARM', {
-          body: 'An alarm is ringing in your room.',
-          tag: `alarm-${roomId}`,
-          renotify: true,
-        })
-        notificationTimer.current = setTimeout(() => n.close(), 20000)
+
+    let disposed = false
+    let pushSubscribed = false
+    const findPush = async () => {
+      try {
+        if (!('serviceWorker' in navigator) || !('PushManager' in window)) return
+        const registration = await navigator.serviceWorker.getRegistration()
+        const subscription = await registration?.pushManager.getSubscription()
+        if (disposed) return
+        pushSubscribed = Boolean(subscription)
+      } catch {
+        // Can't tell — fall back to the in-tab notification.
       }
+    }
+    findPush()
+
+    const show = () => {
+      if (disposed || pushSubscribed || !document.hidden) return
+      const n = new Notification('🚨 ALARM', {
+        body: 'An alarm is ringing in your room.',
+        tag: `alarm-${roomId}`,
+        renotify: true,
+      })
+      notificationTimer.current = setTimeout(() => n.close(), 20000)
     }
     show()
     const onVisibility = () => {
@@ -107,6 +125,7 @@ function AlarmRoom() {
     }
     document.addEventListener('visibilitychange', onVisibility)
     return () => {
+      disposed = true
       clearTimeout(notificationTimer.current)
       document.removeEventListener('visibilitychange', onVisibility)
     }

@@ -21,7 +21,9 @@ self.addEventListener('push', (event) => {
     body: data.body || 'An alarm is ringing in your room.',
     icon: '/favicon.svg',
     badge: '/favicon.svg',
-    tag: `alarm-push-${data.roomId || 'room'}`,
+    // Same tag as the in-tab Notification (AlarmRoom.jsx) so the browser
+    // collapses them instead of showing two alerts for one alarm.
+    tag: `alarm-${data.roomId || 'room'}`,
     renotify: true,
     data: { url: data.url || '/' },
   };
