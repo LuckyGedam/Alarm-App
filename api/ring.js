@@ -28,6 +28,26 @@ function decodeFields(fields) {
   return out
 }
 
+function firestoreBase(projectId) {
+  return `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`
+}
+
+/** Delete a pushDevices doc whose subscription the push service reports as gone. */
+async function deleteDevice(projectId, apiKey, roomId, deviceId, idToken) {
+  const url = `${firestoreBase(projectId)}/rooms/${roomId}/pushDevices/${deviceId}?key=${apiKey}`
+  const response = await fetch(url, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${idToken}` },
+  })
+  if (!response.ok) {
+    console.error(
+      `[ring] failed to delete stale device ${deviceId}: ${response.status} ${(await response.text()).slice(0, 200)}`,
+    )
+  } else {
+    console.error(`[ring] pruned stale push device ${deviceId} (subscription no longer valid)`)
+  }
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' })
@@ -54,33 +74,61 @@ export default async function handler(req, res) {
 
   // List the room's push devices as the caller. Firestore rules enforce that
   // only room members may read this collection.
-  const base = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/rooms/${roomId}/pushDevices`
-  const resp = await fetch(`${base}?key=${apiKey}`, {
+  const listUrl = `${firestoreBase(projectId)}/rooms/${roomId}/pushDevices?key=${apiKey}`
+  const resp = await fetch(listUrl, {
     headers: { Authorization: `Bearer ${idToken}` },
   })
   if (!resp.ok) {
     const detail = await resp.text().catch(() => '')
+    console.error(`[ring] could not list devices for room ${roomId}: ${resp.status} ${detail.slice(0, 200)}`)
     return res.status(resp.status).json({ error: 'Could not read room devices', detail: detail.slice(0, 300) })
   }
 
   const data = await resp.json()
-  const devices = (data.documents || []).map((doc) => decodeFields(doc.fields))
+  const devices = (data.documents || []).map((doc) => ({
+    // The REST doc name ends with /pushDevices/<deviceId>.
+    deviceId: decodeURIComponent(doc.name.split('/').pop()),
+    ...decodeFields(doc.fields),
+  }))
 
-  const targets = devices
-    .filter((device) => device.uid && device.uid !== uid && device.subscription)
-    .map((device) => JSON.parse(device.subscription))
+  const targets = devices.filter(
+    (device) => device.uid && device.uid !== uid && device.subscription,
+  )
 
+  const message = JSON.stringify({ title, body, url, roomId })
   const results = await Promise.allSettled(
-    targets.map((subscription) =>
-      webpush.sendNotification(
-        subscription,
-        JSON.stringify({ title, body, url, roomId }),
-      ),
-    ),
+    targets.map(async ({ deviceId, subscription }) => {
+      try {
+        await webpush.sendNotification(subscription, message)
+        return { status: 'fulfilled' }
+      } catch (error) {
+        const statusCode = error?.statusCode
+        console.error(
+          `[ring] push to device ${deviceId} failed` +
+            (statusCode ? ` (HTTP ${statusCode})` : ` (${error?.message || error})`) +
+            (error?.body ? `: ${String(error.body).slice(0, 200)}` : ''),
+        )
+        // 404/410 means the endpoint is gone (subscription expired or the
+        // device revoked it). Prune it so it stops failing on every alarm.
+        if (statusCode === 404 || statusCode === 410) {
+          await deleteDevice(projectId, apiKey, roomId, deviceId, idToken)
+        }
+        return { status: 'rejected', reason: statusCode }
+      }
+    }),
+  )
+
+  const pushed = results.filter((r) => r.status === 'fulfilled').length
+  const stale = results.filter((r) => r.status === 'rejected' && (r.reason === 404 || r.reason === 410)).length
+
+  console.error(
+    `[ring] room ${roomId} by ${uid}: pushed ${pushed}/${targets.length} devices` +
+      (stale ? ` (${stale} stale pruned)` : ''),
   )
 
   return res.status(200).json({
-    pushed: results.filter((r) => r.status === 'fulfilled').length,
+    pushed,
     total: targets.length,
+    stale,
   })
 }

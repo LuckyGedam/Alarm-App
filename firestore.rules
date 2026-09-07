@@ -115,8 +115,16 @@ service cloud.firestore {
           && request.resource.data.uid == request.auth.uid
           && request.auth.uid in get(/databases/$(database)/documents/rooms/$(roomId)).data.members;
 
-        allow update, delete: if request.auth != null
+        // Re-pointing a subscription stays owner-only. Deletion is open to
+        // any room member so the /api/ring relay (which runs with the
+        // triggerer's token) can prune subscriptions the push service reports
+        // as expired (404/410). Deleting a doc only silences that device's
+        // push; its owner re-enables with a single tap.
+        allow update: if request.auth != null
           && resource.data.uid == request.auth.uid;
+
+        allow delete: if request.auth != null
+          && request.auth.uid in get(/databases/$(database)/documents/rooms/$(roomId)).data.members;
       }
     }
   }
