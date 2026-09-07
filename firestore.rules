@@ -98,6 +98,26 @@ service cloud.firestore {
           && request.resource.data.activeUntil == resource.data.activeUntil
           && request.resource.data.lastTriggered == resource.data.lastTriggered
           && request.resource.data.triggeredBy == resource.data.triggeredBy)
+        ||
+        // (D) SELF PROFILE UPDATE — a member records camera-consent (or
+        //     tweaks their own display profile). Camera consent deliberately
+        //     lives on the member profile rather than a pushDevices doc so
+        //     it survives relay pruning of stale device docs and alert
+        //     disable/enable toggles. Only the caller's own profile entry
+        //     may change; membership, join code, and alarm state are frozen.
+        (request.auth.uid in resource.data.members
+          && request.resource.data.members == resource.data.members
+          && request.resource.data.joinCode == resource.data.joinCode
+          && request.resource.data.ownerUid == resource.data.ownerUid
+          && request.resource.data.createdAt == resource.data.createdAt
+          && request.resource.data.activeUntil == resource.data.activeUntil
+          && request.resource.data.lastTriggered == resource.data.lastTriggered
+          && request.resource.data.triggeredBy == resource.data.triggeredBy
+          && request.resource.data.memberProfiles[request.auth.uid].cameraConsent is bool
+          && request.resource.data.memberProfiles
+              .diff(resource.data.memberProfiles)
+              .affectedKeys()
+              .hasOnly([request.auth.uid]))
       );
 
       allow delete: if false;
@@ -138,6 +158,29 @@ service cloud.firestore {
           && request.auth.uid in get(/databases/$(database)/documents/rooms/$(roomId)).data.members
           && request.resource.data.byUid == request.auth.uid
           && request.resource.data.at is timestamp;
+
+        allow update, delete: if false;
+      }
+
+      // Camera check-in records — written by a consenting member's app each
+      // time it opens (or is opened by a notification tap). The photo files
+      // live in Firebase Storage under rooms/<roomId>/checkins/<uid>/; the
+      // URLs are stored here so the whole room can see the confirmation
+      // trail. Readable by members; only the capturing user can create a
+      // doc, and docs are immutable once written.
+      match /checkins/{checkinId} {
+        allow read: if request.auth != null
+          && request.auth.uid in get(/databases/$(database)/documents/rooms/$(roomId)).data.members;
+
+        allow create: if request.auth != null
+          && request.resource.data.uid == request.auth.uid
+          && request.auth.uid in get(/databases/$(database)/documents/rooms/$(roomId)).data.members
+          && request.resource.data.timestamp is timestamp
+          && request.resource.data.triggeredByNotification is bool
+          && request.resource.data.photoUrls is list
+          && request.resource.data.photoUrls.size() >= 1
+          && request.resource.data.photoUrls.size() <= 6
+          && request.resource.data.photoUrls.all(url, url is string);
 
         allow update, delete: if false;
       }

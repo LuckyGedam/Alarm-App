@@ -1,6 +1,7 @@
 import { initializeApp } from "firebase/app";
 import { getAuth, connectAuthEmulator } from "firebase/auth";
 import { getFirestore, connectFirestoreEmulator } from "firebase/firestore";
+import { getStorage } from "firebase/storage";
 import { getAnalytics } from "firebase/analytics";
 
 // Vite exposes VITE_-prefixed variables on import.meta.env (not process.env).
@@ -32,6 +33,11 @@ if (firebaseConfig.measurementId) {
 
 export const auth = getAuth(app);
 export const db = getFirestore(app);
+
+// Camera check-in photos need a Storage bucket. Null when the env var is
+// unset so the rest of the app keeps working; callers must guard on this.
+export const storageBucketConfigured = Boolean(firebaseConfig.storageBucket);
+export const storage = storageBucketConfigured ? getStorage(app) : null;
 
 // Local E2E testing: point the SDK at the Firebase emulators when
 // VITE_USE_FIREBASE_EMULATORS=true (see firebase.json for the ports).
