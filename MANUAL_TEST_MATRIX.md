@@ -18,6 +18,10 @@ Target: production URL **https://alarm-app-kappa-teal.vercel.app**
      icon** (now standalone) and enable alerts there. Re-test from the icon.
 5. Sanity: both devices show the same **Members** list and the room page shows
    "Listening for alarms…".
+6. (Camera check-ins) On Device A, after enabling alerts you get a one-time
+   **Camera check-ins** consent dialog — tap **I agree** and allow the camera
+   prompt. The room's **Recent check-ins** card then shows front-camera
+   photos taken each time the app opens on A.
 
 > Receiver-side state per row is set *before* Device A taps **Trigger Alarm**.
 
@@ -37,7 +41,17 @@ alarm.
   runtime logs for `[ring]` lines (the diagnostics button on the same card
   covers the browser side, which is likely fine).
 - Test pushes are **not** written to **Recent pushes** — that log is reserved
-  for real alarm deliveries.
+  for real alarm deliveries. Self-test pushes send a single notification
+  (repeat count is only for real triggers).
+- Camera check-ins upload to Firebase Storage under
+  `rooms/<roomId>/checkins/<uid>/` and record a doc under
+  `rooms/<roomId>/checkins/`. If **Recent check-ins** never appears, confirm
+  `storage.rules` and `firestore.rules` were deployed
+  (`firebase deploy --only storage,firestore:rules`) and that
+  `VITE_FIREBASE_STORAGE_BUCKET` is set on Vercel.
+- The front camera prompt is separate from the consent dialog: if it was
+  denied at the OS/browser level, the app skips capture quietly and keeps
+  working (no retry loop).
 
 ## Rows
 
@@ -50,10 +64,15 @@ alarm.
 | 5 | B iPhone: opened from Home Screen icon, app open | Notification appears | ☐ |
 | 6 | B iPhone: opened from Home Screen icon, then app **swiped away** | Notification appears within a few seconds | ☐ |
 | 7 | After any row: tap the notification | Opens the room; if the app/PWA is already open it focuses that window | ☐ |
-| 8 | Repeat rows 2–3 with **2 receivers** | Triggerer's toast: "Alarm sent to 2 of 2 devices" | ☐ |
+| 8 | Repeat rows 2–3 with **2 receivers** | Triggerer's toast: "Sent 3 alerts to 2 of 2 devices" (default repeat count 3) | ☐ |
+| 9 | Sender picks **Repeats per device = 5** before triggering | Receiver shows **5 separate stacked** notifications (not 1), even with the browser fully closed; toast says "Sent 5 alerts to …"; **Recent pushes** shows "Sent 5 alerts …" | ☐ |
+| 10 | Receiver has **not** answered the camera consent dialog yet | Opening the app / tapping a notification shows the consent screen first; **no** camera access happens before consent | ☐ |
+| 11 | Consent given, app opened directly (and again via a notification tap) | 2–3 photos captured and visible in the room's **Recent check-ins** card; entries opened via a tap are marked **"via notification"** | ☐ |
 
 After every trigger, **Device A's room page** gains a **"Recent pushes"** entry
-showing who pushed, when, and the per-platform counts (row 8 check).
+showing who pushed, when, the alert count, and the per-platform counts
+(rows 8–9 check). Note: the repeat-count selector sits above **Trigger Alarm**
+and defaults to 3 — it only affects new triggers.
 
 ## Checking Vercel Runtime Logs (row 8)
 
@@ -63,7 +82,8 @@ showing who pushed, when, and the per-platform counts (row 8 check).
    `[ring] room <id> by <uid>: pushed 2/2 devices` and any per-device
    `[ring] push to device … failed (HTTP …)` lines. A successful row 8 shows
    `pushed 2/2` with **no** failure lines.
-3. Triggerer's toast count should match the log count exactly.
+3. Triggerer's toast count should match the log count exactly (each alarm now
+   logs `sent N notification(s) to X/Y devices`, where N = repeats × devices).
 
 ## If a row fails — what to capture
 
