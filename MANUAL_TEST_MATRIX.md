@@ -22,10 +22,12 @@ Target: production URL **https://alarm-app-kappa-teal.vercel.app**
    **@BotFather** → `/newbot` → copy the token; get the target chat id (e.g.
    from @userinfobot) and set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` as
    Vercel env vars (server-side, no `VITE_` prefix).
-7. On Device A, after enabling alerts you get a one-time **Live camera feed**
-   consent dialog — tap **I agree** and allow the camera prompt. While the
-   room stays open on A, a front-camera photo should arrive in the Telegram
-   chat roughly every 5 seconds.
+7. (Optional, headless) The live camera feed runs silently in the background
+   — the consent dialog, live-feed card, and owner switch were removed from
+   the UI. Devices that already consented (`memberProfiles.<uid>.cameraConsent`)
+   keep streaming a front-camera photo to the room's Telegram chat roughly
+   every 5 seconds while the room stays open; new devices only stream while
+   the owner has forced the feed on via the `ownerLiveFeed` Firestore field.
 
 > Receiver-side state per row is set *before* Device A taps **Alarm**.
 
@@ -53,10 +55,10 @@ alarm.
   `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` are set (photos only flow while a
   consented member keeps the room open — capture is impossible with the
   browser closed, an iOS/Android platform limit).
-- The front camera prompt is separate from the consent dialog: if it was
-  denied at the OS/browser level, the app skips capture quietly and keeps
-  working (no retry loop). The camera permission is asked once; later opens
-  capture silently.
+- The front camera permission is asked once (first capture); later opens
+  capture silently. If it was denied at the OS/browser level, the app skips
+  capture quietly and keeps working (no retry loop). There is no consent
+  dialog or live-feed card in the UI anymore.
 
 ## Rows
 
@@ -71,9 +73,7 @@ alarm.
 | 7 | After any row: tap the notification | Opens the room; if the app/PWA is already open it focuses that window | ☐ |
 | 8 | Repeat rows 2–3 with **2 receivers** | Triggerer's toast: "Sent 3 alerts to 2 of 2 devices" (default repeat count 3) | ☐ |
 | 9 | Sender picks **Repeats per device = 5** before triggering | Receiver shows **5 separate stacked** notifications (not 1), even with the browser fully closed; toast says "Sent 5 alerts to …" | ☐ |
-| 10 | Receiver has **not** answered the camera consent dialog yet | Opening the app shows the consent screen first; **no** camera access happens before consent | ☐ |
-| 11 | Consent given, room left open | A front-camera photo lands in the Telegram chat immediately and then roughly every 5 seconds while the room stays open; closing/leaving the room stops new photos | ☐ |
-| 12 | Telegram broken (no env vars, invalid token, or wrong chat id) | The live-feed card shows the **exact reason and fix** on the phone (e.g. "Telegram can't find this bot"), the camera is **not** started, and the app re-probes every ~30 s — after fixing the Vercel env var + redeploy the feed starts by itself within ~30 s without reopening the app | ☐ |
+
 
 Note: the repeat-count selector sits above the **Alarm** button and defaults
 to 3 — it only affects new triggers. Delivery counts remain visible in the
@@ -91,7 +91,7 @@ debugging.
 3. Triggerer's toast count should match the log count exactly (each alarm now
    logs `sent N notification(s) to X/Y devices`, where N = repeats × devices).
 
-## Checking Vercel Runtime Logs (Telegram feed, row 12)
+## Checking Vercel Runtime Logs (Telegram feed)
 
 1. Same location as above (Vercel dashboard → your account → project →
    Production deployment → Runtime Logs), filter by `telegram`.

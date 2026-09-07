@@ -648,39 +648,6 @@ input:focus {
 }
 .alerts-card .btn-ghost.btn-sm { margin-top: 12px; }
 
-/* ───────────────────────── Camera consent dialog ───────────────────────── */
-
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 9000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-  background: rgba(10, 6, 20, 0.6);
-  backdrop-filter: blur(4px);
-  animation: fade-up 0.25s ease both;
-}
-
-.consent-card {
-  width: min(440px, 100%);
-  align-items: stretch;
-  text-align: left;
-  animation: pop-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
-}
-
-.consent-icon {
-  font-size: 34px;
-  line-height: 1;
-  text-align: center;
-}
-
-.consent-card h3 { text-align: center; }
-.consent-card .muted { max-width: none; }
-.consent-card .muted.small { font-size: 12.5px; }
-.consent-card .controls { justify-content: center; }
-
 /* ───────────────────────── Burst selector ───────────────────────── */
 
 .burst-wrap {
@@ -733,7 +700,7 @@ input:focus {
   box-shadow: 0 4px 12px -4px rgba(139, 47, 247, 0.6);
 }
 
-/* ───────────────────────── Room resume / live feed ───────────────────────── */
+/* ───────────────────────── Room resume ───────────────────────── */
 
 .brand-row {
   display: flex;
@@ -741,40 +708,6 @@ input:focus {
   justify-content: space-between;
   gap: 10px;
   width: min(560px, 100%);
-}
-
-.live-card {
-  padding: 16px 20px;
-}
-
-.live-card h3 {
-  margin: 0;
-  font-size: 16px;
-}
-
-.live-ok {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  font-weight: 600;
-  color: var(--green);
-}
-
-.live-ok .status-dot {
-  flex: none;
-}
-
-.live-card p {
-  margin: 0;
-  max-width: 100%;
-}
-
-.owner-live-state {
-  font-weight: 600;
-}
-
-.owner-live-state.on {
-  color: var(--green);
 }
 
 

