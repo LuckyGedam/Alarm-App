@@ -8,7 +8,8 @@ Target: production URL **https://alarm-app-kappa-teal.vercel.app**
    phone, B on the iPhone (or a second Android).
 2. On **Device A (Android)**: open the URL, sign in as A → **Create Alarm Room**.
 3. Copy the invite link (it contains the join code) and open it on **Device B**,
-   sign in as B → **Join room**.
+   sign in as B — the code in the link auto-joins B to the room (no manual
+   Join tap needed). If it didn't, tap **Join room** manually.
 4. On **both** devices: in the room, open **Device alerts** → **Enable device
    alerts** and accept the browser permission prompt.
    - Android Chrome: prompt appears in-page.

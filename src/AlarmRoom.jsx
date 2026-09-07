@@ -219,6 +219,33 @@ function AlarmRoom() {
     }
   }
 
+  // Auto-join: an invite link carries the join code, so a signed-in invitee
+  // lands directly in the room without tapping "Join room". The code is then
+  // stripped from the URL. A wrong/expired code falls back to the join form
+  // with the error shown (no retry loop).
+  const autoJoinAttempted = useRef(false)
+  useEffect(() => {
+    if (access !== 'invited' || !authState.user) return undefined
+    if (!urlCode || autoJoinAttempted.current) return undefined
+    autoJoinAttempted.current = true
+    setJoining(true)
+    setJoinError('')
+    joinRoom(urlCode)
+      .then(() => {
+        navigate(`/alarm?room=${roomId}`, { replace: true })
+        setToast('You joined the room!')
+      })
+      .catch((err) => {
+        setJoinError(
+          err.code === 'permission-denied'
+            ? 'The join code in this link is no longer valid — ask the owner for a fresh invite link.'
+            : `Could not join: ${err.message}`,
+        )
+      })
+      .finally(() => setJoining(false))
+    return undefined
+  }, [access, urlCode, roomId, authState.user, joinRoom, navigate])
+
   const handleTrigger = async () => {
     try {
       await trigger()
