@@ -7,6 +7,7 @@
 // closed or the tab is in the background.
 import { doc, setDoc, deleteDoc } from 'firebase/firestore'
 import { db } from './firebase'
+import { platform } from './platform'
 
 const SW_PATH = '/sw.js'
 const DEVICE_KEY = 'alarmPushDeviceId'
@@ -19,6 +20,15 @@ export function pushSupported() {
     'PushManager' in window &&
     Boolean(VAPID_PUBLIC_KEY)
   )
+}
+
+/** The stable per-browser device id used for the Firestore doc, if any. */
+export function storedDeviceId() {
+  try {
+    return localStorage.getItem(DEVICE_KEY)
+  } catch {
+    return null
+  }
 }
 
 // Convert a base64url VAPID public key into the Uint8Array PushManager wants.
@@ -35,17 +45,25 @@ export function urlBase64ToUint8Array(base64String) {
 
 /**
  * Enable push alerts for the given room on this device.
+ *
+ * When `silent` is true the browser permission prompt is never shown — used
+ * for the automatic resubscribe-on-load path, where permission was already
+ * granted in an earlier session.
+ *
  * @returns {Promise<{status: 'enabled'|'needs-permission'|'denied'|'unsupported'|'error', message?: string}>}
  */
-export async function enablePush(roomId, user) {
+export async function enablePush(roomId, user, { silent = false } = {}) {
   if (!pushSupported()) return { status: 'unsupported' }
   if (Notification.permission === 'denied') return { status: 'denied' }
 
   const registration = await navigator.serviceWorker.register(SW_PATH)
   let subscription = await registration.pushManager.getSubscription()
 
-    if (!subscription) {
+  if (!subscription) {
     if (Notification.permission !== 'granted') {
+      if (silent) {
+        return { status: Notification.permission === 'denied' ? 'denied' : 'needs-permission' }
+      }
       const permission = await Notification.requestPermission()
       if (permission !== 'granted') {
         return { status: permission === 'denied' ? 'denied' : 'needs-permission' }
@@ -59,14 +77,19 @@ export async function enablePush(roomId, user) {
 
   // Persist this device's subscription in the room so the relay can reach it.
   // A stable per-browser device id makes re-subscribes overwrite, not pile up.
-  let deviceId = localStorage.getItem(DEVICE_KEY)
+  let deviceId = storedDeviceId()
   if (!deviceId) {
     deviceId = crypto.randomUUID()
-    localStorage.setItem(DEVICE_KEY, deviceId)
+    try {
+      localStorage.setItem(DEVICE_KEY, deviceId)
+    } catch {
+      // ignore storage errors
+    }
   }
   await setDoc(doc(db, 'rooms', roomId, 'pushDevices', deviceId), {
     uid: user.uid,
     subscription: JSON.stringify(subscription),
+    platform: platform(),
     updatedAt: new Date(),
   })
   return { status: 'enabled' }
@@ -74,10 +97,14 @@ export async function enablePush(roomId, user) {
 
 /** Disable push alerts for the room and unsubscribe the browser. */
 export async function disablePush(roomId) {
-  const deviceId = localStorage.getItem(DEVICE_KEY)
+  const deviceId = storedDeviceId()
   if (deviceId) {
     await deleteDoc(doc(db, 'rooms', roomId, 'pushDevices', deviceId)).catch(() => {})
-    localStorage.removeItem(DEVICE_KEY)
+    try {
+      localStorage.removeItem(DEVICE_KEY)
+    } catch {
+      // ignore storage errors
+    }
   }
   const registration = await navigator.serviceWorker.getRegistration(SW_PATH)
   const subscription = await registration?.pushManager.getSubscription()
@@ -88,15 +115,24 @@ export async function disablePush(roomId) {
  * Best-effort push relay: ask the serverless function to notify every other
  * device subscribed to this room. Never throws — push is an enhancement; the
  * Firestore listener is the source of truth for the alarm.
+ *
+ * @returns {Promise<{pushed:number,total:number,stale?:number}|null>}
+ *   The relay's device counts when it answered, otherwise null.
  */
 export async function sendPushAlert({ roomId, uid, idToken, title, body, url }) {
   try {
-    await fetch('/api/ring', {
+    const response = await fetch('/api/ring', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ roomId, uid, idToken, title, body, url }),
     })
+    if (!response.ok) {
+      console.warn('Push relay answered with an error:', response.status, (await response.text()).slice(0, 200))
+      return null
+    }
+    return await response.json()
   } catch (error) {
     console.warn('Push relay failed (alarm still fires in-app):', error.message || error)
+    return null
   }
 }

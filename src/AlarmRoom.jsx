@@ -6,7 +6,7 @@ import { auth, db } from './firebase'
 import { useRoomAlarm } from './useRoomAlarm'
 import { playAlarm } from './alarmSound'
 import { avatarGradient, initialsOf, makeJoinCode } from './roomUtils'
-import { enablePush, disablePush, pushSupported, sendPushAlert } from './push'
+import { enablePush, disablePush, pushSupported, sendPushAlert, storedDeviceId } from './push'
 import IosInstallBanner from './IosInstallBanner'
 import { isIOS, isStandalone } from './platform'
 
@@ -133,6 +133,36 @@ function AlarmRoom() {
     }
   }, [alarmActive, roomId])
 
+  // Restore the push state for this room on load. If alerts were enabled
+  // before (a device id is on file) but the browser invalidated the
+  // subscription in the meantime, silently re-subscribe and re-store it —
+  // no permission prompt, since permission was already granted earlier.
+  const isMember = Boolean(room && access === 'member')
+  useEffect(() => {
+    if (!roomId || !authState.user || !isMember) return undefined
+    if (!pushSupported() || !storedDeviceId()) return undefined
+    if (typeof Notification !== 'undefined' && Notification.permission !== 'granted') return undefined
+    let cancelled = false
+    ;(async () => {
+      try {
+        const registration = await navigator.serviceWorker.getRegistration()
+        const subscription = await registration?.pushManager.getSubscription()
+        if (cancelled) return
+        if (subscription) {
+          setPushState('enabled')
+          return
+        }
+        const result = await enablePush(roomId, authState.user, { silent: true })
+        if (!cancelled && result.status === 'enabled') setPushState('enabled')
+      } catch (error) {
+        console.warn('Could not restore push alerts:', error?.message || error)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [roomId, authState.user, isMember])
+
   const copyText = useCallback(
     (text, label = 'Copied!') => {
       navigator.clipboard?.writeText(text).catch(() => {})
@@ -141,6 +171,12 @@ function AlarmRoom() {
     },
     [],
   )
+
+  const flashToast = (message, ms = 2400) => {
+    setToast(message)
+    window.setTimeout(() => setToast(''), ms)
+  }
+
 
   const handleJoin = async (e) => {
     e?.preventDefault()
@@ -164,10 +200,12 @@ function AlarmRoom() {
   const handleTrigger = async () => {
     try {
       await trigger()
-      // Best-effort push to every other subscribed device.
+      // Best-effort push to every other subscribed device, then tell the
+      // triggerer how many devices actually got the push.
+      let message = 'Alarm triggered'
       if (roomId && authState.user && room?.joinCode) {
         const idToken = await authState.user.getIdToken()
-        void sendPushAlert({
+        const result = await sendPushAlert({
           roomId,
           uid: authState.user.uid,
           idToken,
@@ -175,10 +213,17 @@ function AlarmRoom() {
           body: `${authState.user.displayName || 'Someone'} triggered the alarm in your room.`,
           url: `${window.location.origin}/alarm?room=${roomId}`,
         })
+        if (result) {
+          message =
+            result.total === 0
+              ? 'Alarm triggered — no other devices have alerts enabled'
+              : `Alarm sent to ${result.pushed} of ${result.total} device${result.total === 1 ? '' : 's'}`
+        }
       }
+      flashToast(message, 3200)
     } catch (err) {
       console.error('Failed to trigger alarm:', err)
-      setToast('Could not trigger the alarm')
+      flashToast('Could not trigger the alarm', 3200)
     }
   }
 
