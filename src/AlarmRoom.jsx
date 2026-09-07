@@ -7,6 +7,8 @@ import { useRoomAlarm } from './useRoomAlarm'
 import { playAlarm } from './alarmSound'
 import { avatarGradient, initialsOf, makeJoinCode } from './roomUtils'
 import { enablePush, disablePush, pushSupported, sendPushAlert } from './push'
+import IosInstallBanner from './IosInstallBanner'
+import { isIOS, isStandalone } from './platform'
 
 function Toast({ message }) {
   if (!message) return null
@@ -443,6 +445,8 @@ function AlarmRoom() {
           >
             {pushState === 'enabled' ? 'Disable device alerts' : 'Enable device alerts'}
           </button>
+        ) : isIOS() && !isStandalone() ? (
+          <IosInstallBanner />
         ) : (
           <p className="muted small">
             Web Push isn't available here — alarms still ring in the open tab, and the

@@ -610,3 +610,21 @@ input:focus {
   .card { padding: 18px; }
   h1 { font-size: 32px; }
 }
+/* ───────────────────────── iOS install banner ───────────────────────── */
+
+.ios-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  margin: 12px 0 4px;
+}
+.ios-banner-icon { font-size: 26px; line-height: 1; }
+.ios-banner-text { flex: 1; min-width: 0; }
+.ios-banner-text strong { color: var(--text-h); font-size: 14px; }
+.ios-banner-text p { margin: 4px 0 0; font-size: 13px; color: var(--text); line-height: 1.5; }
+.ios-banner-text b { color: var(--text-h); }
+.ios-banner-close { align-self: flex-start; font-size: 12px; padding: 2px 6px; }
