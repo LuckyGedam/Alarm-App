@@ -5,11 +5,13 @@ import { useNavigate } from 'react-router-dom'
 import { auth, db } from './firebase'
 import { makeJoinCode } from './roomUtils'
 import { displayName } from './useRoomAlarm'
+import { lastRoomFor } from './roomSession'
 
 function App() {
   const navigate = useNavigate()
   const [authState, setAuthState] = useState({ checking: true, user: null })
   const [creating, setCreating] = useState(false)
+  const [resuming, setResuming] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -19,6 +21,13 @@ function App() {
         return
       }
       setAuthState({ checking: false, user })
+      // Re-open the room this account last used, instead of landing on the
+      // "Create Alarm Room" page every time the app is opened.
+      const roomId = lastRoomFor(user.uid)
+      if (roomId) {
+        setResuming(true)
+        navigate(`/alarm?room=${encodeURIComponent(roomId)}`, { replace: true })
+      }
     })
     return unsubscribe
   }, [navigate])
@@ -54,11 +63,11 @@ function App() {
     }
   }
 
-  if (authState.checking) {
+  if (authState.checking || resuming) {
     return (
       <div className="page">
         <div className="spinner" aria-label="Checking sign-in" />
-        <p className="muted">Checking sign-in…</p>
+        <p className="muted">{authState.checking ? 'Checking sign-in…' : 'Opening your room…'}</p>
       </div>
     )
   }

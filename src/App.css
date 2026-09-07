@@ -733,3 +733,40 @@ input:focus {
   box-shadow: 0 4px 12px -4px rgba(139, 47, 247, 0.6);
 }
 
+/* ───────────────────────── Room resume / live feed ───────────────────────── */
+
+.brand-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: min(560px, 100%);
+}
+
+.live-card {
+  padding: 16px 20px;
+}
+
+.live-card h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.live-ok {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+  color: var(--green);
+}
+
+.live-ok .status-dot {
+  flex: none;
+}
+
+.live-card p {
+  margin: 0;
+  max-width: 100%;
+}
+
+

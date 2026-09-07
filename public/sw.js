@@ -1,5 +1,5 @@
 // Alarm App service worker — shows Web Push notifications when the page is
-// closed or in the background, and opens the right room when tapped.
+// closed or in the background, and opens/focuses the right room when tapped.
 
 self.addEventListener('install', () => {
   self.skipWaiting();
@@ -35,9 +35,6 @@ self.addEventListener('push', (event) => {
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const target = new URL(event.notification.data?.url || '/', self.location.origin);
-  // Mark this open as coming from a notification tap so the room page can
-  // record the check-in as "triggered by notification" (and then strip it).
-  target.searchParams.set('via', 'notification');
   const href = target.href;
   event.waitUntil(
     (async () => {
@@ -45,33 +42,21 @@ self.addEventListener('notificationclick', (event) => {
         type: 'window',
         includeUncontrolled: true,
       });
+      // Prefer an existing window already on the exact room URL — just focus it.
+      for (const client of windowClients) {
+        if (new URL(client.url).origin === self.location.origin && client.url === href) {
+          return client.focus();
+        }
+      }
+      // Otherwise navigate the first window of this origin to the room.
       for (const client of windowClients) {
         if (new URL(client.url).origin === self.location.origin) {
           await client.navigate(href);
           return client.focus();
         }
       }
+      // No window open at all: open the room (this wakes the installed PWA).
       return self.clients.openWindow(href);
-    })(),
-  );
-});
-
-self.addEventListener('notificationclick', (event) => {
-  event.notification.close();
-  const target = new URL(event.notification.data?.url || '/', self.location.origin).href;
-  event.waitUntil(
-    (async () => {
-      const windowClients = await self.clients.matchAll({
-        type: 'window',
-        includeUncontrolled: true,
-      });
-      for (const client of windowClients) {
-        if (new URL(client.url).origin === self.location.origin) {
-          await client.navigate(target);
-          return client.focus();
-        }
-      }
-      return self.clients.openWindow(target);
     })(),
   );
 });

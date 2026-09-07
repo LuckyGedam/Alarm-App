@@ -5,7 +5,7 @@
 // or network is involved.
 //
 // Run with: npm run test:unit
-import { test, before, beforeEach, afterEach, mock } from 'node:test'
+import { test, before, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import telegramHandler from '../api/telegram.js'
 

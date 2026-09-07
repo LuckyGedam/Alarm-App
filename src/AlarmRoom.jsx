@@ -6,11 +6,12 @@ import { auth, db } from './firebase'
 import { useRoomAlarm } from './useRoomAlarm'
 import { playAlarm } from './alarmSound'
 import { avatarGradient, initialsOf, makeJoinCode } from './roomUtils'
-import { enablePush, disablePush, pushSupported, sendPushAlert, sendTestPush, storedDeviceId, storeSubscription, vapidConfigured } from './push'
+import { autoRestorePush, disablePush, enablePush, pushSupported, sendPushAlert, sendTestPush, vapidConfigured } from './push'
 import { cameraSupported } from './checkin'
 import useLiveCamera from './useLiveCamera'
 import IosInstallBanner from './IosInstallBanner'
 import { isIOS, isStandalone } from './platform'
+import { forgetRoom, rememberRoom } from './roomSession'
 
 function Toast({ message }) {
   if (!message) return null
@@ -49,6 +50,70 @@ function MemberRow({ member, uid, isOwner, isSelf, onRemove }) {
     </li>
   )
 }
+function LiveFeedStatus({ pushState, liveStatus }) {
+  const { kind, lastSentAt } = liveStatus
+  if (pushState !== 'enabled') {
+    return (
+      <p className="muted">
+        Paused — device alerts are off. Turn alerts on to resume sending photos.
+      </p>
+    )
+  }
+  switch (kind) {
+    case 'streaming':
+      return (
+        <>
+          <p className="live-ok">
+            <span className="status-dot" aria-hidden="true" />
+            Sending a photo to this room's Telegram about every 5 seconds.
+          </p>
+          {lastSentAt ? (
+            <p className="muted small">
+              Last photo sent at {new Date(lastSentAt).toLocaleTimeString()}
+            </p>
+          ) : null}
+        </>
+      )
+    case 'starting':
+      return <p className="muted">Starting the camera…</p>
+    case 'waiting':
+      return (
+        <p className="muted">
+          Safari needs one tap to start the camera — tap anywhere on this page.
+        </p>
+      )
+    case 'blocked':
+      return (
+        <p className="error">
+          Camera access is blocked. Allow the camera for this site in your phone's settings, then reopen the app.
+        </p>
+      )
+    case 'notconfigured':
+      return (
+        <p className="error">
+          Camera is ready but Telegram isn't connected: add <code>TELEGRAM_BOT_TOKEN</code> and{' '}
+          <code>TELEGRAM_CHAT_ID</code> in Vercel → Settings → Environment Variables, redeploy, then reopen the room.
+        </p>
+      )
+    case 'paused':
+      return (
+        <p className="muted">
+          Paused while the app is in the background — photos are taken while it stays open.
+        </p>
+      )
+    case 'relayerror':
+      return (
+        <p className="error">
+          Could not send the last photo — retrying automatically. If this keeps showing, check the Vercel runtime
+          logs for <code>/api/telegram</code>.
+        </p>
+      )
+    case 'error':
+      return <p className="error">The camera feed hit an error and paused.</p>
+    default:
+      return <p className="muted">Camera not running.</p>
+  }
+}
 
 
 function AlarmRoom() {
@@ -69,6 +134,7 @@ function AlarmRoom() {
   const [burstCount, setBurstCount] = useState(3) // repeats per recipient device: 1 | 3 | 5 | 10
   const [consentDismissed, setConsentDismissed] = useState(false)
   const [consentSaving, setConsentSaving] = useState(false)
+  const [liveStatus, setLiveStatus] = useState({ kind: 'idle', lastSentAt: 0 })
   const alarmRoomRef = useMemo(() => (roomId ? doc(db, 'rooms', roomId) : null), [roomId])
   const notificationTimer = useRef(null)
 
@@ -150,39 +216,38 @@ function AlarmRoom() {
   }, [alarmActive, roomId])
 
   const isMember = Boolean(room && access === 'member')
+  const uid = authState.user?.uid
 
-  // Restore the push state for this room on load. If alerts were enabled
-  // before (a device id is on file), refresh the stored subscription in
-  // Firestore so it always matches what pushManager actually holds — the
-  // relay may have pruned the doc as stale, or the browser may have swapped
-  // the endpoint. If the browser invalidated the subscription entirely,
-  // silently re-subscribe (no permission prompt — it was granted earlier).
+  // Remember this room so the next app open drops straight back here.
   useEffect(() => {
-    if (!roomId || !authState.user || !isMember) return undefined
-    if (!pushSupported() || !storedDeviceId()) return undefined
-    if (typeof Notification !== 'undefined' && Notification.permission !== 'granted') return undefined
+    if (uid && isMember && roomId) rememberRoom(uid, roomId)
+  }, [uid, isMember, roomId])
+
+  // If the room is gone, stop pointing future opens at it.
+  useEffect(() => {
+    if (!uid) return undefined
+    if (access === 'missing' || access === 'denied') forgetRoom(uid)
+    return undefined
+  }, [uid, access])
+
+  // Silent startup restore: when this account previously granted
+  // notifications, every open of the room re-registers the service worker,
+  // re-creates a subscription if the browser dropped it, and refreshes the
+  // room's pushDevices doc — so the relay can keep reaching this device even
+  // when the app/page is closed. No prompt is ever shown here.
+  useEffect(() => {
+    if (!roomId || !uid || !isMember) return undefined
     let cancelled = false
     ;(async () => {
-      try {
-        const registration = await navigator.serviceWorker.getRegistration()
-        const subscription = await registration?.pushManager.getSubscription()
-        if (subscription) {
-          // Subscription alive: make sure the room's pushDevices doc points
-          // at it (idempotent), then report the device as enabled.
-          await storeSubscription(roomId, authState.user, subscription)
-          if (!cancelled) setPushState('enabled')
-          return
-        }
-        const result = await enablePush(roomId, authState.user, { silent: true })
-        if (!cancelled && result.status === 'enabled') setPushState('enabled')
-      } catch (error) {
-        console.warn('Could not restore push alerts:', error?.message || error)
-      }
+      const result = await autoRestorePush(roomId, authState.user)
+      if (cancelled) return
+      if (result.status === 'enabled') setPushState('enabled')
+      else if (result.status === 'denied') setPushState('denied')
     })()
     return () => {
       cancelled = true
     }
-  }, [roomId, authState.user, isMember])
+  }, [roomId, uid, isMember, authState.user])
 
   // ── Live camera consent ───────────────────────────────────────────
   // Consent lives on the member profile (memberProfiles.<uid>.cameraConsent)
@@ -190,6 +255,7 @@ function AlarmRoom() {
   // toggles. Shown when this device has alerts on but the member has not
   // consented yet; nothing about the camera runs before consent is true.
   const cameraConsent = Boolean(room?.memberProfiles?.[authState.user?.uid]?.cameraConsent)
+  const showLiveCard = isMember && cameraConsent
   // The consent dialog only makes sense when a camera is actually available.
   const showConsentDialog =
     isMember &&
@@ -201,15 +267,18 @@ function AlarmRoom() {
   // Live feed: while this member has the room open with alerts on and has
   // consented, send a front-camera frame to the room's Telegram roughly
   // every 5 seconds. The hook stops the camera when the room is left, the
-  // tab is closed, alerts are disabled, or consent is missing.
+  // tab is closed, alerts are disabled, or consent is missing. It reports
+  // what it is doing so the UI can surface failures (blocked camera, relay
+  // not configured) instead of failing silently.
   const getIdToken = useCallback(async () => {
     if (!authState.user) return null
     return authState.user.getIdToken()
   }, [authState.user])
+  const reportLiveStatus = useCallback((status) => setLiveStatus(status), [])
   const liveFeedActive = Boolean(
     roomId && authState.user && isMember && pushState === 'enabled' && cameraConsent,
   )
-  useLiveCamera({ roomId, active: liveFeedActive, getIdToken })
+  useLiveCamera({ roomId, active: liveFeedActive, getIdToken, onStatus: reportLiveStatus })
 
   const handleCameraConsent = async (allow) => {
     if (!allow) {
@@ -233,6 +302,13 @@ function AlarmRoom() {
       setConsentSaving(false)
       setConsentDismissed(true)
     }
+  }
+
+  // Forget the remembered room and go back to the create/landing page, so
+  // the user can start another room without being auto-redirected back.
+  const goCreateRoom = () => {
+    if (uid) forgetRoom(uid)
+    navigate('/')
   }
 
   const copyText = useCallback(
@@ -558,7 +634,7 @@ function AlarmRoom() {
 
           {!missing && !denied && (
             <div className="controls">
-              <button className="btn btn-ghost" onClick={() => navigate('/')}>Create my own room</button>
+              <button className="btn btn-ghost" onClick={goCreateRoom}>Create my own room</button>
             </div>
           )}
         </div>
@@ -603,9 +679,14 @@ function AlarmRoom() {
 
   return (
     <div className="page fade-up">
-      <div className="brand">
-        <span className="brand-bell" aria-hidden="true">🔔</span>
-        <span className="brand-name">Alarm App</span>
+      <div className="brand-row">
+        <div className="brand">
+          <span className="brand-bell" aria-hidden="true">🔔</span>
+          <span className="brand-name">Alarm App</span>
+        </div>
+        <button className="btn btn-ghost btn-sm" onClick={goCreateRoom} title="Leave this room and create a new one">
+          ＋ New room
+        </button>
       </div>
 
       <div className="room-header">
@@ -670,7 +751,7 @@ function AlarmRoom() {
       <div className="card alerts-card">
         <h3>Device alerts</h3>
         <p className="muted">{pushText}</p>
-        {pushSupported() ? (
+        {pushSupported() && !(isIOS() && !isStandalone()) ? (
           <button
             className={`btn ${pushState === 'enabled' ? 'btn-ghost' : 'btn-primary'}`}
             onClick={handleTogglePush}
@@ -699,6 +780,13 @@ function AlarmRoom() {
           <pre className="diag-output">{JSON.stringify(diag, null, 2)}</pre>
         )}
       </div>
+
+      {showLiveCard && (
+        <div className="card live-card">
+          <h3>📷 Live feed</h3>
+          <LiveFeedStatus pushState={pushState} liveStatus={liveStatus} />
+        </div>
+      )}
 
       <div className="controls trigger-controls">
         {!roomActive && (
