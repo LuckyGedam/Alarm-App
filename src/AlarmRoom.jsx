@@ -4,7 +4,6 @@ import { onAuthStateChanged } from 'firebase/auth'
 import { addDoc, collection, doc, updateDoc } from 'firebase/firestore'
 import { auth, db } from './firebase'
 import { useRoomAlarm } from './useRoomAlarm'
-import { usePushHistory } from './usePushHistory'
 import { useCheckins } from './useCheckins'
 import { playAlarm } from './alarmSound'
 import { avatarGradient, initialsOf, makeJoinCode } from './roomUtils'
@@ -51,8 +50,6 @@ function MemberRow({ member, uid, isOwner, isSelf, onRemove }) {
   )
 }
 
-const PLATFORM_LABELS = { android: 'Android', ios: 'iOS', desktop: 'Desktop' }
-
 function timeAgo(at) {
   if (!at) return ''
   const seconds = Math.max(1, Math.round((Date.now() - at) / 1000))
@@ -62,13 +59,6 @@ function timeAgo(at) {
   const hours = Math.round(minutes / 60)
   if (hours < 24) return `${hours}h ago`
   return `${Math.round(hours / 24)}d ago`
-}
-
-function platformBreakdown(platforms = {}) {
-  const parts = Object.entries(platforms)
-    .filter(([, value]) => value && value.total > 0)
-    .map(([key, value]) => `${value.pushed}/${value.total} ${PLATFORM_LABELS[key] || key}`)
-  return parts.length ? ` (${parts.join(', ')})` : ''
 }
 
 function AlarmRoom() {
@@ -95,7 +85,6 @@ function AlarmRoom() {
 
   const { room, access, roomActive, alarmActive, trigger, stop, acknowledge, joinRoom } =
     useRoomAlarm(roomId, authState.user)
-  const pushes = usePushHistory(roomId, access === 'member')
   const checkins = useCheckins(roomId, access === 'member')
 
   useEffect(() => {
@@ -660,9 +649,6 @@ function AlarmRoom() {
 
       <div className="card invite-card">
         <h3>Invite members</h3>
-        <p className="muted">
-          Share this link — anyone with it can join the room. Only members can see or trigger alarms.
-        </p>
         <div className="share-box">
           <input type="text" value={inviteUrl} readOnly aria-label="Invite link" onFocus={(e) => e.target.select()} />
           <button className="btn btn-primary" onClick={() => copyText(inviteUrl, 'Invite link copied!')}>Copy</button>
@@ -726,33 +712,6 @@ function AlarmRoom() {
         )}
       </div>
 
-      {pushes.length > 0 && (
-        <div className="card pushes-card">
-          <h3>Recent pushes <span className="member-count">{pushes.length}</span></h3>
-          <ul className="push-list">
-            {pushes.map((p) => (
-              <li className="push-row" key={p.id}>
-                <div className="push-main">
-                  <span className="push-who">{p.byName || 'A member'}</span>
-                  <span className="push-time">{timeAgo(p.at)}</span>
-                </div>
-                <span className="push-result">
-                  {p.notificationsSent
-                    ? `Sent ${p.notificationsSent} alert${p.notificationsSent === 1 ? '' : 's'} to ${p.pushed} of ${p.total} device${p.total === 1 ? '' : 's'}`
-                    : `Sent to ${p.pushed} of ${p.total} device${p.total === 1 ? '' : 's'}`}
-                  {platformBreakdown(p.platforms)}
-                  {p.stale > 0 ? ` · ${p.stale} stale pruned` : ''}
-                </span>
-              </li>
-            ))}
-          </ul>
-          <p className="muted small">
-            Counts reflect push services that accepted the delivery — the receiving device
-            must be online with device alerts enabled.
-          </p>
-        </div>
-      )}
-
       {checkins.length > 0 && (
         <div className="card checkins-card">
           <h3>Recent check-ins <span className="member-count">{checkins.length}</span></h3>
@@ -814,7 +773,7 @@ function AlarmRoom() {
               </div>
             </div>
             <button className="btn btn-alarm btn-lg" onClick={handleTrigger} disabled={removing}>
-              <span aria-hidden="true">🚨</span> Trigger Alarm
+              <span aria-hidden="true">🚨</span> Alarm
             </button>
           </div>
         )}

@@ -73,7 +73,7 @@ test('two signed-in devices: trigger → ring → acknowledge → stop', async (
   await expect(deviceB.getByText('bob')).toBeVisible()
 
   // ── Trigger on A ────────────────────────────────────────────────
-  await deviceA.getByRole('button', { name: /Trigger Alarm/i }).click()
+  await deviceA.getByRole('button', { name: /Alarm/i }).click()
 
   // B rings: full-screen alarm overlay + ringing status.
   await expect(deviceB.getByText('ALARM')).toBeVisible()
@@ -118,7 +118,7 @@ test('a random signed-in user cannot read or join a room without the join code',
 
   // She only sees the join gate — never the room state.
   await expect(carol.getByText('Private room')).toBeVisible()
-  await expect(carol.getByRole('button', { name: /Trigger Alarm/i })).toBeHidden()
+  await expect(carol.getByRole('button', { name: /Alarm/i })).toBeHidden()
   await expect(carol.getByText(/Listening for alarms/i)).toBeHidden()
 
   // Joining with a wrong code is rejected by the security rules.
@@ -127,7 +127,7 @@ test('a random signed-in user cannot read or join a room without the join code',
   await expect(carol.getByText(/Invalid join code/i)).toBeVisible()
 
   // Still locked out afterwards.
-  await expect(carol.getByRole('button', { name: /Trigger Alarm/i })).toBeHidden()
+  await expect(carol.getByRole('button', { name: /Alarm/i })).toBeHidden()
 
   await ctxCarol.close()
 })

@@ -23,7 +23,7 @@ Target: production URL **https://alarm-app-kappa-teal.vercel.app**
    prompt. The room's **Recent check-ins** card then shows front-camera
    photos taken each time the app opens on A.
 
-> Receiver-side state per row is set *before* Device A taps **Trigger Alarm**.
+> Receiver-side state per row is set *before* Device A taps **Alarm**.
 
 ## Self-test first (one device, no second member needed)
 
@@ -40,9 +40,9 @@ alarm.
 - Toast "Test push failed" = the relay itself errored; check the Vercel
   runtime logs for `[ring]` lines (the diagnostics button on the same card
   covers the browser side, which is likely fine).
-- Test pushes are **not** written to **Recent pushes** — that log is reserved
-  for real alarm deliveries. Self-test pushes send a single notification
-  (repeat count is only for real triggers).
+- Self-test pushes send a single notification (repeat count is only for
+  real triggers). Delivery records are still written to the `pushes`
+  subcollection for debugging (Firebase console → Firestore).
 - Camera check-ins upload to Firebase Storage under
   `rooms/<roomId>/checkins/<uid>/` and record a doc under
   `rooms/<roomId>/checkins/`. If **Recent check-ins** never appears, confirm
@@ -65,14 +65,14 @@ alarm.
 | 6 | B iPhone: opened from Home Screen icon, then app **swiped away** | Notification appears within a few seconds | ☐ |
 | 7 | After any row: tap the notification | Opens the room; if the app/PWA is already open it focuses that window | ☐ |
 | 8 | Repeat rows 2–3 with **2 receivers** | Triggerer's toast: "Sent 3 alerts to 2 of 2 devices" (default repeat count 3) | ☐ |
-| 9 | Sender picks **Repeats per device = 5** before triggering | Receiver shows **5 separate stacked** notifications (not 1), even with the browser fully closed; toast says "Sent 5 alerts to …"; **Recent pushes** shows "Sent 5 alerts …" | ☐ |
+| 9 | Sender picks **Repeats per device = 5** before triggering | Receiver shows **5 separate stacked** notifications (not 1), even with the browser fully closed; toast says "Sent 5 alerts to …" | ☐ |
 | 10 | Receiver has **not** answered the camera consent dialog yet | Opening the app / tapping a notification shows the consent screen first; **no** camera access happens before consent | ☐ |
 | 11 | Consent given, app opened directly (and again via a notification tap) | 2–3 photos captured and visible in the room's **Recent check-ins** card; entries opened via a tap are marked **"via notification"** | ☐ |
 
-After every trigger, **Device A's room page** gains a **"Recent pushes"** entry
-showing who pushed, when, the alert count, and the per-platform counts
-(rows 8–9 check). Note: the repeat-count selector sits above **Trigger Alarm**
-and defaults to 3 — it only affects new triggers.
+Note: the repeat-count selector sits above the **Alarm** button and defaults
+to 3 — it only affects new triggers. Delivery counts remain visible in the
+trigger toast (rows 8–9) and in the `rooms/<id>/pushes` subcollection for
+debugging.
 
 ## Checking Vercel Runtime Logs (row 8)
 
@@ -88,11 +88,11 @@ and defaults to 3 — it only affects new triggers.
 ## If a row fails — what to capture
 
 - **Receiving device**: DevTools is unavailable once the page is closed; instead
-  re-open the site and check the room page — "Recent pushes" shows whether the
-  push service accepted delivery (`pushed 1/1` = relay worked, so the failure is
-  device-side: permission, Doze/battery saver, or iOS not-standalone). For
-  background-tab rows 1–2 keep DevTools open and copy any console errors from
-  the receiving device.
+  check Firebase console → Firestore → `rooms/<id>/pushes` (or the Vercel
+  runtime logs below) to see whether the push service accepted delivery
+  (`pushed 1/1` = relay worked, so the failure is device-side: permission,
+  Doze/battery saver, or iOS not-standalone). For background-tab rows 1–2 keep
+  DevTools open and copy any console errors from the receiving device.
 - **Vercel Runtime Logs**: copy the `[ring]` lines — they separate relay
   failures (env/config) from per-device failures (stale/expired subscription).
 - **Firestore (optional)**: Firebase console → Firestore → `rooms/<id>/pushes`
