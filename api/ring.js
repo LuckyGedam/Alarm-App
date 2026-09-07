@@ -121,6 +121,15 @@ export default async function handler(req, res) {
   const pushed = results.filter((r) => r.status === 'fulfilled').length
   const stale = results.filter((r) => r.status === 'rejected' && (r.reason === 404 || r.reason === 410)).length
 
+  // Per-platform breakdown (allSettled keeps result order aligned with targets).
+  const platforms = {}
+  targets.forEach((target, index) => {
+    const key = target.platform || 'desktop'
+    const entry = (platforms[key] ||= { total: 0, pushed: 0 })
+    entry.total += 1
+    if (results[index]?.status === 'fulfilled') entry.pushed += 1
+  })
+
   console.error(
     `[ring] room ${roomId} by ${uid}: pushed ${pushed}/${targets.length} devices` +
       (stale ? ` (${stale} stale pruned)` : ''),
@@ -130,5 +139,6 @@ export default async function handler(req, res) {
     pushed,
     total: targets.length,
     stale,
+    platforms,
   })
 }

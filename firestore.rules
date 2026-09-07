@@ -126,6 +126,21 @@ service cloud.firestore {
         allow delete: if request.auth != null
           && request.auth.uid in get(/databases/$(database)/documents/rooms/$(roomId)).data.members;
       }
+
+      // Push-delivery history — an immutable log written by the triggerer's
+      // device after /api/ring answers (pushed/total/stale per platform),
+      // readable by every member so they can see how far an alarm went.
+      match /pushes/{pushId} {
+        allow read: if request.auth != null
+          && request.auth.uid in get(/databases/$(database)/documents/rooms/$(roomId)).data.members;
+
+        allow create: if request.auth != null
+          && request.auth.uid in get(/databases/$(database)/documents/rooms/$(roomId)).data.members
+          && request.resource.data.byUid == request.auth.uid
+          && request.resource.data.at is timestamp;
+
+        allow update, delete: if false;
+      }
     }
   }
 }

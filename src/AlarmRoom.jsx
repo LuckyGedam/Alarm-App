@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { onAuthStateChanged } from 'firebase/auth'
-import { doc, updateDoc } from 'firebase/firestore'
+import { addDoc, collection, doc, updateDoc } from 'firebase/firestore'
 import { auth, db } from './firebase'
 import { useRoomAlarm } from './useRoomAlarm'
+import { usePushHistory } from './usePushHistory'
 import { playAlarm } from './alarmSound'
 import { avatarGradient, initialsOf, makeJoinCode } from './roomUtils'
 import { enablePush, disablePush, pushSupported, sendPushAlert, storedDeviceId } from './push'
@@ -48,6 +49,26 @@ function MemberRow({ member, uid, isOwner, isSelf, onRemove }) {
   )
 }
 
+const PLATFORM_LABELS = { android: 'Android', ios: 'iOS', desktop: 'Desktop' }
+
+function timeAgo(at) {
+  if (!at) return ''
+  const seconds = Math.max(1, Math.round((Date.now() - at) / 1000))
+  if (seconds < 60) return `${seconds}s ago`
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.round(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.round(hours / 24)}d ago`
+}
+
+function platformBreakdown(platforms = {}) {
+  const parts = Object.entries(platforms)
+    .filter(([, value]) => value && value.total > 0)
+    .map(([key, value]) => `${value.pushed}/${value.total} ${PLATFORM_LABELS[key] || key}`)
+  return parts.length ? ` (${parts.join(', ')})` : ''
+}
+
 function AlarmRoom() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
@@ -65,6 +86,7 @@ function AlarmRoom() {
 
   const { room, access, roomActive, alarmActive, trigger, stop, acknowledge, joinRoom } =
     useRoomAlarm(roomId, authState.user)
+  const pushes = usePushHistory(roomId, access === 'member')
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
@@ -214,6 +236,16 @@ function AlarmRoom() {
           url: `${window.location.origin}/alarm?room=${roomId}`,
         })
         if (result) {
+          // Record the delivery outcome so every member can see it.
+          addDoc(collection(db, 'rooms', roomId, 'pushes'), {
+            at: new Date(),
+            byUid: authState.user.uid,
+            byName: authState.user.displayName || authState.user.email?.split('@')[0] || 'Member',
+            pushed: result.pushed,
+            total: result.total,
+            stale: result.stale || 0,
+            platforms: result.platforms || {},
+          }).catch((error) => console.warn('Could not record push history:', error?.message || error))
           message =
             result.total === 0
               ? 'Alarm triggered — no other devices have alerts enabled'
@@ -499,6 +531,31 @@ function AlarmRoom() {
           </p>
         )}
       </div>
+
+      {pushes.length > 0 && (
+        <div className="card pushes-card">
+          <h3>Recent pushes <span className="member-count">{pushes.length}</span></h3>
+          <ul className="push-list">
+            {pushes.map((p) => (
+              <li className="push-row" key={p.id}>
+                <div className="push-main">
+                  <span className="push-who">{p.byName || 'A member'}</span>
+                  <span className="push-time">{timeAgo(p.at)}</span>
+                </div>
+                <span className="push-result">
+                  Sent to {p.pushed} of {p.total} device{p.total === 1 ? '' : 's'}
+                  {platformBreakdown(p.platforms)}
+                  {p.stale > 0 ? ` · ${p.stale} stale pruned` : ''}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <p className="muted small">
+            Counts reflect push services that accepted the delivery — the receiving device
+            must be online with device alerts enabled.
+          </p>
+        </div>
+      )}
 
       <div className="controls trigger-controls">
         {!roomActive && (
