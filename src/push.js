@@ -56,19 +56,21 @@ export async function enablePush(roomId, user, { silent = false } = {}) {
   if (!pushSupported()) return { status: 'unsupported' }
   if (Notification.permission === 'denied') return { status: 'denied' }
 
+  // Ask for permission BEFORE any await. Browsers only reliably show the
+  // notification prompt while the click's user activation is still fresh;
+  // once we await a promise the gesture is consumed and some browsers (e.g.
+  // Chrome on Android) silently auto-deny instead of prompting.
+  if (Notification.permission !== 'granted' && !silent) {
+    const permission = await Notification.requestPermission()
+    if (permission !== 'granted') {
+      return { status: permission === 'denied' ? 'denied' : 'needs-permission' }
+    }
+  }
+
   const registration = await navigator.serviceWorker.register(SW_PATH)
   let subscription = await registration.pushManager.getSubscription()
 
-  if (!subscription) {
-    if (Notification.permission !== 'granted') {
-      if (silent) {
-        return { status: Notification.permission === 'denied' ? 'denied' : 'needs-permission' }
-      }
-      const permission = await Notification.requestPermission()
-      if (permission !== 'granted') {
-        return { status: permission === 'denied' ? 'denied' : 'needs-permission' }
-      }
-    }
+  if (!subscription && Notification.permission === 'granted') {
     subscription = await registration.pushManager.subscribe({
       userVisibleOnly: true,
       applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),

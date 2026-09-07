@@ -463,7 +463,7 @@ function AlarmRoom() {
   const pushText =
     pushState === 'enabled' ? 'Device alerts are on' :
     pushState === 'needs-permission' ? 'Allow notifications to get alerts here' :
-    pushState === 'denied' ? 'Notifications are blocked in browser settings' :
+    pushState === 'denied' ? 'Notifications are blocked — tap the lock/ℹ️ icon in the address bar → Site settings → Notifications → Allow' :
     pushState === 'unsupported' ? 'This browser does not support push alerts' :
     pushState === 'error' ? 'Could not enable alerts — try again' :
     pushState === 'working' ? 'Setting up…' :
