@@ -136,6 +136,26 @@ test('surfaces a Telegram rejection as 502', async () => {
   Object.assign(process.env, ENV)
   telegramStatus = 400
   telegramResponse = { ok: false, description: 'chat not found' }
-  const { status } = await callTelegram(validBody())
+  const { status, body } = await callTelegram(validBody())
   assert.equal(status, 502)
+  assert.ok(String(body.error).includes('chat'))
+})
+
+test('explains a 404 as an invalid bot token', async () => {
+  Object.assign(process.env, ENV)
+  telegramStatus = 404
+  telegramResponse = { ok: false, error_code: 404, description: 'Not Found' }
+  const { status, body } = await callTelegram(validBody())
+  assert.equal(status, 502)
+  assert.ok(/token/i.test(String(body.error)))
+})
+
+test('trims whitespace around the bot token before calling Telegram', async () => {
+  Object.assign(process.env, {
+    ...ENV,
+    TELEGRAM_BOT_TOKEN: ' 123:test-token\n',
+  })
+  const { status } = await callTelegram(validBody())
+  assert.equal(status, 200)
+  assert.ok(String(telegramCalls[0].url).includes('/bot123:test-token/sendPhoto'))
 })

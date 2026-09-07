@@ -51,7 +51,7 @@ function MemberRow({ member, uid, isOwner, isSelf, onRemove }) {
   )
 }
 function LiveFeedStatus({ ownerLiveFeed, liveFeedActive, liveStatus, pushState }) {
-  const { kind, lastSentAt } = liveStatus
+  const { kind, lastSentAt, message } = liveStatus
   if (liveFeedActive) {
     switch (kind) {
       case 'streaming':
@@ -90,6 +90,21 @@ function LiveFeedStatus({ ownerLiveFeed, liveFeedActive, liveStatus, pushState }
             <code>TELEGRAM_CHAT_ID</code> in Vercel → Settings → Environment Variables, redeploy, then reopen the room.
           </p>
         )
+      case 'badtoken':
+        return (
+          <p className="error">
+            Telegram can't find this bot — the <code>TELEGRAM_BOT_TOKEN</code> in Vercel is invalid or stale.
+            Generate a fresh one in @BotFather with <code>/token</code>, paste it into Vercel, redeploy. Retrying
+            automatically meanwhile.
+          </p>
+        )
+      case 'badchat':
+        return (
+          <p className="error">
+            Telegram can't find the chat — check <code>TELEGRAM_CHAT_ID</code> in Vercel and make sure the bot is
+            added to the chat (message it once first). Retrying automatically meanwhile.
+          </p>
+        )
       case 'paused':
         return (
           <p className="muted">
@@ -99,8 +114,9 @@ function LiveFeedStatus({ ownerLiveFeed, liveFeedActive, liveStatus, pushState }
       case 'relayerror':
         return (
           <p className="error">
-            Could not send the last photo — retrying automatically. If this keeps showing, check the Vercel runtime
-            logs for <code>/api/telegram</code>.
+            Could not send the last photo — retrying automatically.
+            {message ? <> Reason: {message}.</> : null}{' '}
+            If this keeps showing, check the Vercel runtime logs for <code>/api/telegram</code>.
           </p>
         )
       case 'error':

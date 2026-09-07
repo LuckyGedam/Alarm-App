@@ -81,10 +81,14 @@ export default function useLiveCamera({ roomId, active, getIdToken, onStatus }) 
 
     // Map a relay failure to a user-facing category. "Not configured" is
     // final until the Vercel env vars exist (report once, stop hammering);
-    // other server/network errors are transient and retried on the next tick.
+    // a bad bot token or chat id needs a Vercel env fix (kept retrying so the
+    // feed resumes automatically once the user redeploys); other server /
+    // network errors are transient and retried on the next tick.
     const classifySendError = (error) => {
       const message = String(error?.message || error)
       if (/not configured/i.test(message)) return 'notconfigured'
+      if (/can't find this bot|not found/i.test(message)) return 'badtoken'
+      if (/can't find the chat|chat not found/i.test(message)) return 'badchat'
       return 'relayerror'
     }
 

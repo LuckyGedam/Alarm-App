@@ -37,8 +37,10 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'image, roomId and idToken are required' })
   }
 
-  const token = process.env.TELEGRAM_BOT_TOKEN
-  const chatId = process.env.TELEGRAM_CHAT_ID
+  // Trim: a stray newline/space from pasting the token into Vercel's env
+  // field makes Telegram answer 404 "Not Found" for an otherwise valid bot.
+  const token = String(process.env.TELEGRAM_BOT_TOKEN || '').trim()
+  const chatId = String(process.env.TELEGRAM_CHAT_ID || '').trim()
   if (!token || !chatId) {
     console.error('[telegram] relay not configured (missing TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID)')
     return res.status(500).json({ error: 'Telegram relay is not configured' })
@@ -85,11 +87,29 @@ export default async function handler(req, res) {
       // means Telegram does not know this bot token at all.
       const tokenHint = token ? `${token.slice(0, 6)}…${token.slice(-4)} (len ${token.length})` : '(missing)'
       const chatHint = /^-?\d+$/.test(String(chatId)) ? `id ${chatId}` : `username/chat '${chatId}'`
+      const description = String(payload?.description || '')
+      let hint = 'Telegram rejected the photo'
+      // A 404 (description exactly "Not Found") means Telegram does not
+      // recognise the bot token; "chat not found" is a different, 400 error.
+      if (telegramResponse.status === 404 || /^not found$/i.test(description)) {
+        hint =
+          "Telegram can't find this bot (404): the TELEGRAM_BOT_TOKEN in Vercel is invalid or stale — " +
+          'generate a fresh token in @BotFather with /token and paste it exactly'
+      } else if (/chat not found/i.test(description)) {
+        hint =
+          `Telegram can't find the chat (400): check TELEGRAM_CHAT_ID (${chatHint}) and ` +
+          'add the bot to the chat and message it once first'
+      } else if (/forbidden/i.test(description)) {
+        hint =
+          'Telegram blocked this send (403): add the bot to the chat and message it once first'
+      } else if (description) {
+        hint += `: ${description.slice(0, 160)}`
+      }
       console.error(
         `[telegram] sendPhoto failed: HTTP ${telegramResponse.status} ${JSON.stringify(payload).slice(0, 300)} ` +
           `(token ${tokenHint}, chat ${chatHint})`,
       )
-      return res.status(502).json({ error: 'Telegram rejected the photo' })
+      return res.status(502).json({ error: hint })
     }
     return res.status(200).json({ ok: true })
   } catch (error) {
