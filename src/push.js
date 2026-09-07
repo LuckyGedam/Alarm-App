@@ -48,6 +48,35 @@ export function urlBase64ToUint8Array(base64String) {
   return outputArray
 }
 
+// A stable per-browser device id makes re-subscribes overwrite, not pile up.
+function deviceId() {
+  let id = storedDeviceId()
+  if (!id) {
+    id = crypto.randomUUID()
+    try {
+      localStorage.setItem(DEVICE_KEY, id)
+    } catch {
+      // ignore storage errors
+    }
+  }
+  return id
+}
+
+/**
+ * Write (or refresh) this browser's push subscription on the room's
+ * pushDevices doc. Idempotent — safe to call on every room load so the doc
+ * always matches what pushManager actually holds, even if the relay pruned
+ * the doc as stale in the meantime.
+ */
+export async function storeSubscription(roomId, user, subscription) {
+  await setDoc(doc(db, 'rooms', roomId, 'pushDevices', deviceId()), {
+    uid: user.uid,
+    subscription: JSON.stringify(subscription),
+    platform: platform(),
+    updatedAt: new Date(),
+  })
+}
+
 /**
  * Enable push alerts for the given room on this device.
  *
@@ -83,22 +112,7 @@ export async function enablePush(roomId, user, { silent = false } = {}) {
   }
 
   // Persist this device's subscription in the room so the relay can reach it.
-  // A stable per-browser device id makes re-subscribes overwrite, not pile up.
-  let deviceId = storedDeviceId()
-  if (!deviceId) {
-    deviceId = crypto.randomUUID()
-    try {
-      localStorage.setItem(DEVICE_KEY, deviceId)
-    } catch {
-      // ignore storage errors
-    }
-  }
-  await setDoc(doc(db, 'rooms', roomId, 'pushDevices', deviceId), {
-    uid: user.uid,
-    subscription: JSON.stringify(subscription),
-    platform: platform(),
-    updatedAt: new Date(),
-  })
+  await storeSubscription(roomId, user, subscription)
   return { status: 'enabled' }
 }
 
@@ -123,15 +137,18 @@ export async function disablePush(roomId) {
  * device subscribed to this room. Never throws — push is an enhancement; the
  * Firestore listener is the source of truth for the alarm.
  *
- * @returns {Promise<{pushed:number,total:number,stale?:number}|null>}
+ * `count` is how many separate notifications each recipient device gets
+ * (server-clamped to 1–10, default 3).
+ *
+ * @returns {Promise<{pushed:number,total:number,notificationsSent:number,stale?:number}|null>}
  *   The relay's device counts when it answered, otherwise null.
  */
-export async function sendPushAlert({ roomId, uid, idToken, title, body, url, test = false }) {
+export async function sendPushAlert({ roomId, uid, idToken, title, body, url, test = false, count }) {
   try {
     const response = await fetch('/api/ring', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ roomId, uid, idToken, title, body, url, test }),
+      body: JSON.stringify({ roomId, uid, idToken, title, body, url, test, count }),
     })
     if (!response.ok) {
       console.warn('Push relay answered with an error:', response.status, (await response.text()).slice(0, 200))
@@ -151,7 +168,7 @@ export async function sendPushAlert({ roomId, uid, idToken, title, body, url, te
  * subscription → /api/ring → push service → service worker — without needing
  * a second member to trigger a real alarm.
  *
- * @returns {Promise<{pushed:number,total:number,stale?:number}|null>}
+ * @returns {Promise<{pushed:number,total:number,notificationsSent:number,stale?:number}|null>}
  */
 export async function sendTestPush({ roomId, uid, idToken }) {
   return sendPushAlert({
@@ -162,5 +179,7 @@ export async function sendTestPush({ roomId, uid, idToken }) {
     body: 'Push delivery works end to end on this device.',
     url: `${window.location.origin}/alarm?room=${roomId}`,
     test: true,
+    // A self-test is a single ping — the repeated burst is for real alarms.
+    count: 1,
   })
 }

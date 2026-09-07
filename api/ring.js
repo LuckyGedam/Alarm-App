@@ -115,34 +115,70 @@ export default async function handler(req, res) {
       (test ? device.uid === uid : Boolean(device.uid) && device.uid !== uid),
   )
 
-  const message = JSON.stringify({ title, body, url, roomId })
+  // How many separate notifications each recipient gets. The sender picks
+  // 1–10 in the UI (default 3); the client value is truncated and clamped
+  // here so a modified/malicious request cannot spam a device hundreds of
+  // times or ask for a fractional burst.
+  const count = Math.min(Math.max(1, Math.trunc(Number(req.body?.count) || 3)), 10)
+
+  // Unique per-push tag (roomId + trigger time + index) so Android/Chrome
+  // STACK the burst as separate notifications instead of the newest silently
+  // replacing the previous one (the default when `tag` is reused). The tag
+  // travels inside the payload; public/sw.js reads data.tag.
+  const tagBase = `${roomId}-${Date.now()}`
+
   // Note: the per-device callback must REJECT on failure (not resolve with a
   // status object) — Promise.allSettled wraps a resolved value as
   // { status: 'fulfilled', value }, so an inner { status: 'rejected' } object
-  // would be counted as a successful push. Outer fulfilled == push accepted
-  // by the push service; outer rejected == push failed.
+  // would be counted as a successful push. Outer fulfilled == the push
+  // service accepted at least one push for the device.
   const results = await Promise.allSettled(
     targets.map(async ({ deviceId, subscription }) => {
-      try {
-        await webpush.sendNotification(subscription, message)
-      } catch (error) {
-        const statusCode = error?.statusCode
+      // Back-to-back sends with no artificial delay: real-world delivery
+      // timing across push services/OSes already spaces the burst out, and
+      // staying loop-bound keeps total execution time well under the
+      // serverless timeout (10 sends/device tops).
+      let sent = 0
+      let failure = null
+      for (let i = 0; i < count && !failure; i += 1) {
+        const message = JSON.stringify({
+          title,
+          body,
+          url,
+          roomId,
+          tag: `${tagBase}-${i}`,
+        })
+        try {
+          await webpush.sendNotification(subscription, message)
+          sent += 1
+        } catch (error) {
+          failure = error
+        }
+      }
+      if (failure) {
+        const statusCode = failure?.statusCode
         console.error(
           `[ring] push to device ${deviceId} failed` +
-            (statusCode ? ` (HTTP ${statusCode})` : ` (${error?.message || error})`) +
-            (error?.body ? `: ${String(error.body).slice(0, 200)}` : ''),
+            (statusCode ? ` (HTTP ${statusCode})` : ` (${failure?.message || failure})`) +
+            (failure?.body ? `: ${String(failure.body).slice(0, 200)}` : ''),
         )
         // 404/410 means the endpoint is gone (subscription expired or the
-        // device revoked it). Prune it so it stops failing on every alarm.
+        // device revoked it) — the rest of the burst would fail the same
+        // way, so stop and prune the doc so it stops failing on every alarm.
         if (statusCode === 404 || statusCode === 410) {
           await deleteDevice(projectId, apiKey, roomId, deviceId, idToken)
         }
-        throw error
+        throw failure
       }
+      return sent
     }),
   )
 
   const pushed = results.filter((r) => r.status === 'fulfilled').length
+  const notificationsSent = results.reduce(
+    (sum, r) => sum + (r.status === 'fulfilled' ? r.value : 0),
+    0,
+  )
   const stale = results.filter(
     (r) => r.status === 'rejected' && (r.reason?.statusCode === 404 || r.reason?.statusCode === 410),
   ).length
@@ -158,13 +194,14 @@ export default async function handler(req, res) {
 
   const mode = test ? 'SELF-TEST' : 'ALARM'
   console.error(
-    `[ring] ${mode} room ${roomId} by ${uid}: pushed ${pushed}/${targets.length} devices` +
+    `[ring] ${mode} room ${roomId} by ${uid}: sent ${notificationsSent} notification(s) to ${pushed}/${targets.length} devices` +
       (stale ? ` (${stale} stale pruned)` : ''),
   )
 
   return res.status(200).json({
     pushed,
     total: targets.length,
+    notificationsSent,
     stale,
     platforms,
   })

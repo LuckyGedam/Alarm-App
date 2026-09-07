@@ -158,10 +158,16 @@ test('a normal alarm pushes only to OTHER members, using the caller token', asyn
   const { status, body } = await callRing(alarmBody)
 
   assert.equal(status, 200)
-  assert.deepEqual(body, { pushed: 1, total: 1, stale: 0, platforms: { desktop: { total: 1, pushed: 1 } } })
-  // Exactly one push, and it went to the other member's device.
-  assert.equal(received.length, 1)
-  assert.equal(received[0].path, '/push/deviceB')
+  assert.deepEqual(body, {
+    pushed: 1,
+    total: 1,
+    notificationsSent: 3,
+    stale: 0,
+    platforms: { desktop: { total: 1, pushed: 1 } },
+  })
+  // The default burst is 3 back-to-back pushes, all to the other member.
+  assert.equal(received.length, 3)
+  assert.ok(received.every((r) => r.path === '/push/deviceB'))
   // The device list was read with the triggerer's ID token (rules apply).
   assert.equal(firestore.list.length, 1)
   assert.equal(firestore.list[0].auth, 'Bearer token-a')
@@ -176,10 +182,16 @@ test('a self-test (test:true) pushes to the CALLER\'s own devices only', async (
     ],
   })
 
-  const { status, body } = await callRing({ ...alarmBody, test: true })
+  const { status, body } = await callRing({ ...alarmBody, test: true, count: 1 })
 
   assert.equal(status, 200)
-  assert.deepEqual(body, { pushed: 1, total: 1, stale: 0, platforms: { desktop: { total: 1, pushed: 1 } } })
+  assert.deepEqual(body, {
+    pushed: 1,
+    total: 1,
+    notificationsSent: 1,
+    stale: 0,
+    platforms: { desktop: { total: 1, pushed: 1 } },
+  })
   // The push went to the caller's own device, not the other member's.
   assert.equal(received.length, 1)
   assert.equal(received[0].path, '/push/deviceA')
@@ -195,7 +207,7 @@ test('a self-test with no stored subscription for the caller reports total 0', a
   const { status, body } = await callRing({ ...alarmBody, test: true })
 
   assert.equal(status, 200)
-  assert.deepEqual(body, { pushed: 0, total: 0, stale: 0, platforms: {} })
+  assert.deepEqual(body, { pushed: 0, total: 0, notificationsSent: 0, stale: 0, platforms: {} })
   assert.equal(received.length, 0)
 })
 
@@ -212,11 +224,53 @@ test('a 404 from the push service is counted stale and the device doc is pruned'
   const { status, body } = await callRing(alarmBody)
 
   assert.equal(status, 200)
-  assert.deepEqual(body, { pushed: 0, total: 1, stale: 1, platforms: { desktop: { total: 1, pushed: 0 } } })
-  // The expired device was pruned via Firestore REST with the caller's token.
+  assert.deepEqual(body, {
+    pushed: 0,
+    total: 1,
+    notificationsSent: 0,
+    stale: 1,
+    platforms: { desktop: { total: 1, pushed: 0 } },
+  })
+  // The burst stops at the first failure: exactly ONE push was attempted and
+  // the expired device was pruned via Firestore REST with the caller's token.
+  assert.equal(received.length, 1)
+  assert.equal(received[0].path, '/push/deviceB')
   assert.equal(firestore.deletes.length, 1)
   assert.equal(firestore.deletes[0].deviceId, 'deviceB')
   assert.equal(firestore.deletes[0].auth, 'Bearer token-a')
+})
+
+test('an explicit count of 1 sends a single notification per device', async () => {
+  Object.assign(process.env, ENV)
+  installFirestoreStub({
+    devices: [{ deviceId: 'deviceB', uid: 'uid-b', subscription: makeSubscription('deviceB') }],
+  })
+
+  const { status, body } = await callRing({ ...alarmBody, count: 1 })
+
+  assert.equal(status, 200)
+  assert.equal(body.pushed, 1)
+  assert.equal(body.notificationsSent, 1)
+  assert.equal(received.length, 1)
+})
+
+test('the burst count is clamped server-side (99 → 10, junk → 3)', async () => {
+  Object.assign(process.env, ENV)
+  installFirestoreStub({
+    devices: [{ deviceId: 'deviceB', uid: 'uid-b', subscription: makeSubscription('deviceB') }],
+  })
+
+  // A malicious/edited request cannot spam a device hundreds of times.
+  const huge = await callRing({ ...alarmBody, count: 99 })
+  assert.equal(huge.status, 200)
+  assert.equal(huge.body.notificationsSent, 10)
+  assert.equal(received.length, 10)
+
+  received = []
+  const junk = await callRing({ ...alarmBody, count: 'definitely-not-a-number' })
+  assert.equal(junk.status, 200)
+  assert.equal(junk.body.notificationsSent, 3)
+  assert.equal(received.length, 3)
 })
 
 test('missing required fields are rejected with 400', async () => {
