@@ -1,10 +1,14 @@
-// /api/telegram — live camera-to-Telegram relay.
+// /api/telegram — live camera-to-Telegram relay (+ alarm text fallback).
 //
-// The room page captures a front-camera JPEG every ~5 seconds and POSTs it
-// here (base64 JSON). This function verifies the caller is a room member
-// (via Firestore REST with their own ID token, exactly like /api/ring), then
-// uploads the frame to a fixed Telegram chat via the Bot API. Photos never
-// touch Firebase Storage.
+// Two modes, both gated by the same room-membership check:
+//   1. Photo feed: the room page captures a front-camera JPEG every ~5
+//      seconds and POSTs it here (base64 JSON); the frame is uploaded to a
+//      fixed Telegram chat via the Bot API. Photos never touch Firebase
+//      Storage.
+//   2. Text alarm: when an alarm is triggered, the client also POSTs
+//      { text, roomId, idToken } so the room's Telegram chat gets a
+//      guaranteed alert — Web Push delivery is throttled/queued by browsers
+//      when an app sits closed for hours, so this is the reliable channel.
 //
 // Environment (server-side only):
 //   TELEGRAM_BOT_TOKEN                — from @BotFather (/newbot)
@@ -96,17 +100,47 @@ async function handleHealth(res, token, chatId) {
   }
 }
 
+/** Send a plain text message to the room's Telegram chat (alarm fallback). */
+async function sendTelegramText(res, token, chatId, roomId, text) {
+  try {
+    const telegramResponse = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: String(text).slice(0, 1000),
+        disable_notification: false,
+      }),
+    })
+    const payload = await telegramResponse.json().catch(() => ({}))
+    if (!telegramResponse.ok || payload.ok !== true) {
+      const tokenHint = token ? `${token.slice(0, 6)}…${token.slice(-4)} (len ${token.length})` : '(missing)'
+      const { hint } = telegramFailureHint(telegramResponse.status, payload?.description, token, chatId)
+      console.error(
+        `[telegram] sendMessage failed: HTTP ${telegramResponse.status} ${JSON.stringify(payload).slice(0, 300)} ` +
+          `(token ${tokenHint}, chat ${chatId})`,
+      )
+      return res.status(502).json({ error: hint })
+    }
+    console.log(`[telegram] alarm message sent for room ${roomId}`)
+    return res.status(200).json({ ok: true })
+  } catch (error) {
+    console.error('[telegram] relay error:', error?.message || error)
+    return res.status(500).json({ error: 'Telegram relay failed' })
+  }
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' })
   }
 
-  const { image, roomId, idToken, health } = req.body || {}
+  const { image, roomId, idToken, health, text } = req.body || {}
   if (!roomId || !idToken) {
     return res.status(400).json({ error: 'roomId and idToken are required' })
   }
-  if (!health && !image) {
-    return res.status(400).json({ error: 'image, roomId and idToken are required' })
+  if (!health && !image && !text) {
+    return res.status(400).json({ error: 'image or text, roomId and idToken are required' })
   }
 
   // Trim: a stray newline/space from pasting the token into Vercel's env
@@ -132,6 +166,11 @@ export default async function handler(req, res) {
   if (!token || !chatId) {
     console.error('[telegram] relay not configured (missing TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID)')
     return res.status(500).json({ error: 'Telegram relay is not configured' })
+  }
+
+  // Alarm fallback: a text message needs no image handling at all.
+  if (text) {
+    return sendTelegramText(res, token, chatId, roomId, text)
   }
 
   const clean = String(image).replace(/^data:image\/[a-z+]+;base64,/i, '')

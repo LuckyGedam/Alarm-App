@@ -204,3 +204,39 @@ test('health probe maps chat not found to a bad chat id', async () => {
   assert.equal(body.reason, 'badchat')
   assert.ok(/chat/i.test(String(body.error)))
 })
+
+test('text mode sends an alarm message via sendMessage', async () => {
+  Object.assign(process.env, ENV)
+  const { status, body } = await callTelegram({
+    text: '🚨 ALARM in room room-123 — alice triggered the alarm',
+    roomId: ROOM_ID,
+    idToken: 'token-1',
+  })
+  assert.equal(status, 200)
+  assert.equal(body.ok, true)
+  assert.equal(telegramCalls.length, 1)
+
+  const options = telegramCalls[0]
+  assert.ok(String(options.url).includes('/bot123:test-token/sendMessage'))
+  const payload = JSON.parse(options.body)
+  assert.equal(payload.chat_id, 'chat-42')
+  assert.match(String(payload.text), /ALARM in room room-123/)
+  assert.equal(payload.disable_notification, false)
+})
+
+test('text mode is gated by room membership like photos', async () => {
+  Object.assign(process.env, ENV)
+  member = false
+  const { status } = await callTelegram({ text: 'hello', roomId: ROOM_ID, idToken: 'token-1' })
+  assert.equal(status, 403)
+  assert.equal(telegramCalls.length, 0)
+})
+
+test('text mode maps a 404 to an invalid bot token hint', async () => {
+  Object.assign(process.env, ENV)
+  telegramStatus = 404
+  telegramResponse = { ok: false, error_code: 404, description: 'Not Found' }
+  const { status, body } = await callTelegram({ text: 'hello', roomId: ROOM_ID, idToken: 'token-1' })
+  assert.equal(status, 502)
+  assert.ok(/token/i.test(String(body.error)))
+})

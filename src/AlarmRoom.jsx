@@ -11,6 +11,10 @@ import useLiveCamera from './useLiveCamera'
 import IosInstallBanner from './IosInstallBanner'
 import { isIOS, isStandalone } from './platform'
 import { forgetRoom, rememberRoom } from './roomSession'
+import useHeartbeat from './useHeartbeat'
+import { useAlarmHistory } from './useAlarmHistory'
+import { sendTelegramText } from './checkin'
+import InstallBanner from './InstallBanner'
 
 function Toast({ message }) {
   if (!message) return null
@@ -27,15 +31,48 @@ function MemberAvatar({ name, photoURL }) {
   )
 }
 
+/** Human-readable "last seen" for a member profile, based on lastSeenAt. */
+function lastSeenOf(member) {
+  const raw = member?.lastSeenAt
+  if (!raw) return null
+  const ts = typeof raw.toMillis === 'function' ? raw.toMillis() : new Date(raw).getTime()
+  if (!ts) return null
+  const diff = Date.now() - ts
+  if (diff < 2 * 60_000) return { text: 'Active now', online: true }
+  if (diff < 60 * 60_000) return { text: `${Math.max(1, Math.floor(diff / 60_000))}m ago`, online: false }
+  if (diff < 24 * 60 * 60_000) return { text: `${Math.floor(diff / 3_600_000)}h ago`, online: false }
+  if (diff < 48 * 60 * 60_000) return { text: 'Yesterday', online: false }
+  return { text: `Last seen ${new Date(ts).toLocaleDateString()}`, online: false }
+}
+
+function formatAlarmTime(ts) {
+  if (!ts) return ''
+  const date = new Date(ts)
+  const now = new Date()
+  const time = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  if (date.toDateString() === now.toDateString()) return `Today ${time}`
+  const yesterday = new Date(now)
+  yesterday.setDate(now.getDate() - 1)
+  if (date.toDateString() === yesterday.toDateString()) return `Yesterday ${time}`
+  return `${date.toLocaleDateString()} ${time}`
+}
+
 function MemberRow({ member, uid, isOwner, isSelf, onRemove }) {
+  const lastSeen = lastSeenOf(member)
   return (
     <li className="member-row">
       <MemberAvatar name={member.name} photoURL={member.photoURL} />
-      <span className="member-name">
-        {member.name}
-        {isSelf && <span className="badge">You</span>}
-        {isOwner && <span className="badge badge-owner">Owner</span>}
-      </span>
+      <div className="member-info">
+        <span className="member-name">
+          {member.name}
+          {isSelf && <span className="badge">You</span>}
+          {isOwner && <span className="badge badge-owner">Owner</span>}
+        </span>
+        <span className={`member-last-seen${lastSeen?.online ? ' online' : ''}`}>
+          {lastSeen?.online && <span className="online-dot" aria-hidden="true" />}
+          {lastSeen ? lastSeen.text : 'Never opened the app'}
+        </span>
+      </div>
       {isOwner && !isSelf && (
         <button
           className="btn btn-icon btn-danger"
@@ -179,6 +216,14 @@ function AlarmRoom() {
     }
   }, [roomId, uid, isMember, authState.user])
 
+  // Keep last-seen fresh while this device has the room open, so every
+  // other member can see when this device last opened the app.
+  useHeartbeat({ roomId, uid, active: isMember })
+
+  // Live list of recent alarms — "what did I miss?" when the browser
+  // throttled/queued push delivery while the app was closed.
+  const alarms = useAlarmHistory(roomId, isMember)
+
   // ── Live camera (headless) ────────────────────────────────────────
   // The camera feed runs silently in the background — all camera-related UI
   // (consent dialog, live-feed status card, owner switch) was removed by
@@ -274,6 +319,16 @@ function AlarmRoom() {
   const handleTrigger = async () => {
     try {
       await trigger()
+      // Record the alarm so every member can see what was triggered and
+      // when — even when push delivery gets delayed by the browser.
+      if (roomId && authState.user) {
+        addDoc(collection(db, 'rooms', roomId, 'alarms'), {
+          at: new Date(),
+          byUid: authState.user.uid,
+          byName: authState.user.displayName || authState.user.email?.split('@')[0] || 'Member',
+          count: burstCount,
+        }).catch((error) => console.warn('Could not record alarm history:', error?.message || error))
+      }
       // Best-effort push to every other subscribed device, then tell the
       // triggerer how many devices actually got the push.
       let message = 'Alarm triggered'
@@ -305,6 +360,14 @@ function AlarmRoom() {
               ? 'Alarm triggered — no other devices have alerts enabled'
               : `Sent ${result.notificationsSent || 0} alert${result.notificationsSent === 1 ? '' : 's'} to ${result.pushed} of ${result.total} device${result.total === 1 ? '' : 's'}`
         }
+        // Reliable fallback channel: Web Push can be throttled/queued by
+        // browsers for hours when an app sits closed — Telegram is not.
+        // Best-effort; push + Firestore state stay the source of truth.
+        sendTelegramText({
+          text: `🚨 ALARM in room ${roomId} — ${authState.user.displayName || 'Someone'} triggered the alarm`,
+          roomId,
+          idToken,
+        }).catch((error) => console.warn('Telegram alarm message not sent:', error?.message || error))
       }
       flashToast(message, 3600)
     } catch (err) {
@@ -371,8 +434,6 @@ function AlarmRoom() {
     if (pushState === 'enabled') {
       await disablePush(roomId)
       setPushState('idle')
-      // A later re-enable asks for camera consent again (if not yet given).
-      setConsentDismissed(false)
       setToast('Device alerts disabled')
       return
     }
@@ -553,6 +614,10 @@ function AlarmRoom() {
   // ── Member view ─────────────────────────────────────────────────────
   const isTriggerer = room.triggeredBy === authState.user.uid
   const inviteUrl = `${window.location.origin}/alarm?room=${roomId}&code=${room.joinCode}`
+  const onlineCount = room.members.reduce(
+    (count, memberUid) => count + (lastSeenOf(room.memberProfiles?.[memberUid])?.online ? 1 : 0),
+    0,
+  )
 
   let statusText
   let statusKind = 'listening'
@@ -628,7 +693,10 @@ function AlarmRoom() {
       </div>
 
       <div className="card members-card">
-        <h3>Members <span className="member-count">{room.members.length}</span></h3>
+        <h3>
+          Members <span className="member-count">{room.members.length}</span>
+          {onlineCount > 0 && <span className="members-online"> · {onlineCount} online</span>}
+        </h3>
         <ul className="member-list">
           {room.members.map((uid) => {
             const member = room.memberProfiles?.[uid] || { name: uid.slice(0, 6) }
@@ -645,6 +713,26 @@ function AlarmRoom() {
           })}
         </ul>
       </div>
+
+      {alarms.length > 0 && (
+        <div className="card alarms-card">
+          <h3>Recent alarms</h3>
+          <ul className="alarm-history-list">
+            {alarms.map((alarm) => (
+              <li key={alarm.id} className="alarm-history-item">
+                <span className="alarm-history-icon" aria-hidden="true">🚨</span>
+                <span className="alarm-history-text">
+                  <strong>{formatAlarmTime(alarm.at)}</strong>
+                  {' · '}{alarm.byName || 'Member'}
+                  {alarm.count > 1 ? ` · ${alarm.count}×` : ''}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <InstallBanner />
 
       <div className="card alerts-card">
         <h3>Device alerts</h3>

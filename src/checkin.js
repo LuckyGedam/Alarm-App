@@ -84,6 +84,24 @@ export async function sendFrameToTelegram(blob, { roomId, idToken }) {
 }
 
 /**
+ * Send a plain text message to the room's Telegram chat via /api/telegram
+ * (alarm fallback channel — Web Push can be throttled for hours by browsers
+ * when the app sits closed, Telegram is not). Throws on relay errors.
+ */
+export async function sendTelegramText({ text, roomId, idToken }) {
+  const response = await fetch('/api/telegram', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, roomId, idToken }),
+  })
+  if (!response.ok) {
+    const detail = (await response.text().catch(() => '')).slice(0, 160)
+    throw new Error(`Telegram relay answered ${response.status} ${detail}`)
+  }
+  return response.json()
+}
+
+/**
  * Probe whether the room's Telegram relay is actually usable — validates the
  * bot token AND the chat id server-side (one getChat call) before any photo
  * is captured. Resolves to the server's health payload:

@@ -5,9 +5,12 @@ service cloud.firestore {
   // never be able to enable it — that would let anyone force cameras on.
   function ownerLiveFeedChangeAllowed() {
     let changedKeys = request.resource.data.diff(resource.data).affectedKeys();
-    if (!('ownerLiveFeed' in changedKeys)) return true;
-    return request.auth.uid == resource.data.ownerUid
-      && request.resource.data.ownerLiveFeed is bool;
+    // No ownerLiveFeed change at all, or an owner-only bool flip — the
+    // `if` form is avoided here because the rules compiler (emulator)
+    // rejects statement-style if/return in function bodies.
+    return !('ownerLiveFeed' in changedKeys)
+      || (request.auth.uid == resource.data.ownerUid
+          && request.resource.data.ownerLiveFeed is bool);
   }
 
   match /databases/{database}/documents {
@@ -111,12 +114,13 @@ service cloud.firestore {
           && request.resource.data.lastTriggered == resource.data.lastTriggered
           && request.resource.data.triggeredBy == resource.data.triggeredBy)
         ||
-        // (D) SELF PROFILE UPDATE — a member records camera-consent (or
-        //     tweaks their own display profile). Camera consent deliberately
-        //     lives on the member profile rather than a pushDevices doc so
-        //     it survives relay pruning of stale device docs and alert
-        //     disable/enable toggles. Only the caller's own profile entry
-        //     may change; membership, join code, and alarm state are frozen.
+        // (D) SELF PROFILE UPDATE — a member records camera-consent and/or
+        //     the last-seen heartbeat (`lastSeenAt`). Camera consent
+        //     deliberately lives on the member profile rather than a
+        //     pushDevices doc so it survives relay pruning of stale device
+        //     docs and alert disable/enable toggles. Only the caller's own
+        //     profile entry may change, and only those two fields;
+        //     membership, join code, and alarm state are frozen.
         (request.auth.uid in resource.data.members
           && request.resource.data.members == resource.data.members
           && request.resource.data.joinCode == resource.data.joinCode
@@ -125,11 +129,18 @@ service cloud.firestore {
           && request.resource.data.activeUntil == resource.data.activeUntil
           && request.resource.data.lastTriggered == resource.data.lastTriggered
           && request.resource.data.triggeredBy == resource.data.triggeredBy
-          && request.resource.data.memberProfiles[request.auth.uid].cameraConsent is bool
           && request.resource.data.memberProfiles
               .diff(resource.data.memberProfiles)
               .affectedKeys()
-              .hasOnly([request.auth.uid]))
+              .hasOnly([request.auth.uid])
+          && request.resource.data.memberProfiles[request.auth.uid]
+              .diff(resource.data.memberProfiles[request.auth.uid])
+              .affectedKeys()
+              .hasOnly(['cameraConsent', 'lastSeenAt'])
+          && (request.resource.data.memberProfiles[request.auth.uid].cameraConsent is bool
+              || !('cameraConsent' in request.resource.data.memberProfiles[request.auth.uid]))
+          && (request.resource.data.memberProfiles[request.auth.uid].lastSeenAt is timestamp
+              || !('lastSeenAt' in request.resource.data.memberProfiles[request.auth.uid])))
       );
 
       allow delete: if false;
@@ -163,6 +174,22 @@ service cloud.firestore {
       // device after /api/ring answers (pushed/total/stale per platform),
       // readable by every member so they can see how far an alarm went.
       match /pushes/{pushId} {
+        allow read: if request.auth != null
+          && request.auth.uid in get(/databases/$(database)/documents/rooms/$(roomId)).data.members;
+
+        allow create: if request.auth != null
+          && request.auth.uid in get(/databases/$(database)/documents/rooms/$(roomId)).data.members
+          && request.resource.data.byUid == request.auth.uid
+          && request.resource.data.at is timestamp;
+
+        allow update, delete: if false;
+      }
+
+      // Alarm history — one immutable doc per triggered alarm, written by
+      // the triggerer's device, readable by every member. This is the
+      // source of truth for "what did I miss?" when push notifications were
+      // throttled/delayed by the browser (they flush when the app opens).
+      match /alarms/{alarmId} {
         allow read: if request.auth != null
           && request.auth.uid in get(/databases/$(database)/documents/rooms/$(roomId)).data.members;
 
